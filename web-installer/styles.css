@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; }
+body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 0 auto; padding: 1rem; line-height: 1.5; }
+header .sub { color: #555; }
+.insecure-note { border-left: 4px solid #c00; padding: .5rem .75rem; background: #fff5f5; }
+@media (prefers-color-scheme: dark) { .insecure-note { background: #2a1111; } header .sub { color: #aaa; } }
+.card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+.row { display: flex; gap: .5rem; flex-wrap: wrap; margin: .5rem 0; }
+button, .button { padding: .5rem .9rem; border-radius: 6px; border: 1px solid #888; background: #eee; color: inherit; text-decoration: none; cursor: pointer; font-size: 1rem; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.info { font-size: .95rem; white-space: pre-wrap; }
+.hint { font-size: .9rem; color: #666; }
+.drop { border: 2px dashed #888; border-radius: 8px; padding: 1.5rem; text-align: center; margin-top: .75rem; }
+.drop.over { border-color: #06c; background: #eef6ff; }
+pre { background: #111; color: #eee; padding: .75rem; border-radius: 6px; overflow-x: auto; }
+code { font-size: .92em; }

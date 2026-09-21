@@ -1,0 +1,3 @@
+[build]
+# Intentionally no global `target` here: host tests build for x86_64,
+# firmware is built explicitly with `--target thumbv8m.main-none-eabihf`.

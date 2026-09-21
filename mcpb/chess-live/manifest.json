@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "chess-live",
+  "version": "0.2.0",
+  "description": "Live chess board: play moves over MCP and watch each game auto-refresh in a browser page.",
+  "author": { "name": "LoRa Mesh Handoff" },
+  "server": {
+    "type": "python",
+    "entry_point": "server/chess_live_bundle.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server/chess_live_bundle.py"],
+      "env": {
+        "CHESS_LIVE_PORT": "${user_config.port}",
+        "CHESS_LIVE_STATE": "${user_config.stateFile}"
+      }
+    }
+  },
+  "user_config": {
+    "port": {
+      "type": "string",
+      "title": "Board page port",
+      "description": "Localhost port for the auto-refresh board pages (http://127.0.0.1:PORT/board/<game>).",
+      "default": "8765",
+      "required": true
+    },
+    "stateFile": {
+      "type": "string",
+      "title": "State file",
+      "description": "Where game positions persist. Leave default unless you share state between installs.",
+      "default": "${HOME}/.chess-live/chess-live.json",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "python": ">=3.10" }
+  },
+  "keywords": ["chess", "board", "game", "live-view"]
+}

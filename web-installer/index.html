@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoRa Mesh — Pico 2 W Web Installer (RP2350)</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>LoRa Mesh — Pico 2 W Web Installer</h1>
+  <p class="sub">Static page, no build step. No <code>sudo</code>, no keys leave the board.
+  Flashing is a UF2 file copy onto the BOOTSEL mass-storage volume.</p>
+  <p class="insecure-note"><strong>Private secure mesh is the default.</strong>
+  A Meshtastic-compatibility mode, if ever offered here, would be labelled
+  <em>insecure</em> — this installer never enables it.</p>
+</header>
+
+<main>
+<section id="step1" class="card">
+  <h2>1 · Pick a firmware image</h2>
+  <p><strong>Default: radio-secure.</strong> The radio-free image is a bench
+  diagnostic only (pairing/contacts/time work, RF returns
+  <code>RADIO_UNAVAILABLE</code>).</p>
+  <label for="release">Release:</label>
+  <select id="release" aria-label="Firmware release"></select>
+  <div id="release-info" class="info" aria-live="polite"></div>
+  <p class="hint">Releases are defined in <code>releases.json</code> next to this
+  page. Each entry has a file URL plus SHA-256 so you can verify the download
+  before copying it to the board.</p>
+</section>
+
+<section id="step2" class="card">
+  <h2>2 · Enter BOOTSEL (hold-button flow)</h2>
+  <ol>
+    <li>Unplug the Pico 2 W.</li>
+    <li>Hold <strong>BOOTSEL</strong>, plug USB back in, then release.</li>
+    <li>A mass-storage volume appears named <code>RPI-RP2</code>
+      (some hosts show <code>RP2350</code>).</li>
+  </ol>
+  <div class="row">
+    <button id="btn-detect-usb" type="button">Detect board (WebUSB)</button>
+    <button id="btn-pick-drive" type="button">Pick BOOTSEL drive…</button>
+  </div>
+  <div id="detect-out" class="info" aria-live="polite">Not probed yet.</div>
+</section>
+
+<section id="step3" class="card">
+  <h2>3 · Copy the UF2</h2>
+  <p>Option A (automatic, Chromium): download the UF2 below, then
+  <strong>Pick BOOTSEL drive…</strong> and press
+  <strong>Write UF2 to drive</strong>. Option B (every browser): drag the
+  downloaded <code>.uf2</code> file onto the <code>RPI-RP2</code> drive in your
+  file manager. The board reboots itself when the copy finishes.</p>
+  <div class="row">
+    <a id="btn-download" class="button" href="#" download>Download UF2</a>
+    <button id="btn-write" type="button" disabled>Write UF2 to drive</button>
+  </div>
+  <div class="drop" id="drop" tabindex="0" role="button"
+       aria-label="Drag the UF2 here or press Enter to choose it">
+    Drag &amp; drop the <code>.uf2</code> here to select it
+    (then use option B in your file manager).
+  </div>
+  <div id="copy-out" class="info" aria-live="polite"></div>
+  <progress id="copy-progress" max="100" value="0" hidden></progress>
+</section>
+
+<section id="step4" class="card">
+  <h2>4 · Verify with <code>meshctl status</code></h2>
+  <p>After the board reboots as a CDC node, probe it from a terminal
+  (replace <code>/dev/ttyACM0</code> with your port):</p>
+  <pre id="verify-cmd">python3 -m meshctl --port /dev/ttyACM0 status</pre>
+  <button id="btn-copy-cmd" type="button">Copy command</button>
+  <p>Expect JSON containing (values vary per board):</p>
+  <pre>{
+  "board": "pico2w",
+  "image": "radio-secure",
+  "radio_available": true,
+  "provisioned": false
+}</pre>
+  <p>A radio-free diagnostic image instead reports
+  <code>"image": "radio-free"</code> and <code>"radio_available": false</code>
+  with no <code>radio_version</code> field. Identify boards by USB serial plus
+  this status output — never by <code>ttyACM</code> number.</p>
+</section>
+
+<section id="limits" class="card">
+  <h2>RP2350 UF2 limits</h2>
+  <ul>
+    <li>There is <strong>no WebSerial / esptool path</strong> for the RP2350.
+      ESP32-style ROM-bootloader flashing over a serial port does not exist
+      here; the only browser-visible route is the BOOTSEL UF2 mass-storage
+      volume, optionally enumerated read-only via WebUSB
+      (<code>2e8a:000f</code> BOOTSEL, <code>2e8a:0001</code> app).</li>
+    <li>Browsers cannot mount/unmount volumes and cannot reboot the board into
+      BOOTSEL themselves — the hold-button step is physical and mandatory.</li>
+    <li>WebUSB cannot claim the BOOTSEL mass-storage interface; detection is
+      informational only. The actual write uses the File System Access API
+      (Chromium) or a manual file-manager copy (everywhere else).</li>
+    <li>Firefox/Safari have no File System Access directory-write path, so
+      only download + drag-drop works there.</li>
+    <li>SHA-256 is checked in-page after download when the manifest carries a
+      hash; the browser never handles keys or provisioning secrets.</li>
+  </ul>
+</section>
+</main>
+
+<footer>
+  <p>Serve this directory statically (e.g. <code>python3 -m http.server</code>).
+  File System Access writes need a secure context
+  (<code>https://</code> or <code>http://localhost</code>).</p>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "board": "pico2w",
+  "chip": "RP2350",
+  "default": "radio-secure",
+  "releases": [
+    {
+      "id": "radio-secure-latest",
+      "image": "radio-secure",
+      "label": "radio-secure (default — private mesh + SX1276 RF)",
+      "version": "0.1.0",
+      "file": "firmware/radio-secure.uf2",
+      "sha256": "",
+      "notes": "Default image. Initializes SPI + SX1276, reports radio_available true. Copy this unless you explicitly need the diagnostic build."
+    },
+    {
+      "id": "radio-free-diag",
+      "image": "radio-free",
+      "label": "radio-free (diagnostic only — no RF)",
+      "version": "0.1.0",
+      "file": "firmware/radio-free.uf2",
+      "sha256": "",
+      "notes": "Bench diagnostic. Never touches SPI/radio; send/ping/radio-on return RADIO_UNAVAILABLE. Pairing, contacts and time still work."
+    }
+  ]
+}

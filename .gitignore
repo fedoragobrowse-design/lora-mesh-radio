@@ -1,0 +1,6 @@
+/target/
+/.venv/
+__pycache__/
+*.py[cod]
+/.mesh-local/
+/host/*.egg-info/
