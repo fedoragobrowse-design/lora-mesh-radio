@@ -660,7 +660,10 @@ impl Engine {
             o.ed_pub
         };
         pairing::check_not_self(&own_ed, &offer.ed_pub).map_err(|_| EngineError::BadRequest)?;
-        // Duplicate signing identity against existing contacts.
+        // Duplicate signing identity against existing contacts. `replace`
+        // cannot currently renew the same peer in place: this fails closed
+        // before slot selection even when `replace` is true. Repair a stale
+        // slot with contact_delete, then a fresh offer with replace=false.
         for c in self.contacts.iter() {
             if c.present && c.ed_peer == offer.ed_pub {
                 return Err(EngineError::BadRequest);

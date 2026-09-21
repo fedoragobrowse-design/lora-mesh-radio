@@ -986,14 +986,11 @@ fn op_pair_import(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Ou
         Ok(o) => {
             stage_for_commit(state);
             let mut w = JsonWriter::new(out);
-            const HEX: &[u8; 16] = b"0123456789abcdef";
             let n = (|| {
                 w.raw(b"{\"id\":")?;
                 w.num(req.id)?;
                 w.raw(b",\"ok\":true,\"result\":{\"fingerprint\":\"")?;
-                for b in o.fingerprint {
-                    w.raw(&[HEX[(b >> 4) as usize], HEX[(b & 0xf) as usize]])?;
-                }
+                w.raw(&o.fingerprint)?;
                 w.raw(b"\"")?;
                 if let Some(c) = o.contact_id {
                     debug_assert!(matches!(o.step, PairStep::Active));

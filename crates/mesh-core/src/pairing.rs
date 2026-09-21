@@ -14,8 +14,12 @@
 //!   offer until explicit cancellation or 10-minute expiry
 //!   ([`is_expired`]). Abort, failure or restart discards temporary secrets;
 //!   resuming requires fresh offers.
-//! - Replacing an existing contact needs an explicit operator `--replace`;
-//!   this module never overwrites stored contacts itself.
+//! - An operator flag named `--replace` exists, but the current firmware
+//!   `import_offer` duplicate-identity guard fails closed before slot
+//!   selection even when that flag is set, so it cannot renew the same peer
+//!   in place today. Repair a stale slot with `contact_delete`, then a fresh
+//!   offer with `replace=false`. This module never overwrites stored
+//!   contacts itself.
 //! - T comparison ceremony: both operators compare the [`transcript_fingerprint`]
 //!   (first 16 hex digits of `T`) shown on each host. On mismatch the
 //!   pairing is aborted, never auto-accepted.
@@ -145,9 +149,9 @@ pub fn decode_offer_payload(bytes: &[u8]) -> Result<Offer, PairError> {
     offer
         .eph_pub
         .copy_from_slice(&bytes[1 + ED_PUB_LEN..1 + ED_PUB_LEN + EPH_PUB_LEN]);
-    offer.challenge.copy_from_slice(
-        &bytes[1 + ED_PUB_LEN + EPH_PUB_LEN..OFFER_PAYLOAD_LEN],
-    );
+    offer
+        .challenge
+        .copy_from_slice(&bytes[1 + ED_PUB_LEN + EPH_PUB_LEN..OFFER_PAYLOAD_LEN]);
     Ok(offer)
 }
 
@@ -297,8 +301,9 @@ pub fn is_expired(start_mono_s: u64, now_mono_s: u64) -> bool {
     now_mono_s.saturating_sub(start_mono_s) >= PAIRING_EXPIRY_SECS
 }
 
-/// First 16 lowercase hex characters of `T` for the human comparison
-/// ceremony. Both operators read these aloud; mismatch aborts the pairing.
+/// First 16 lowercase hex characters of `T` (raw transcript bytes `T[0..8]`)
+/// for the human comparison ceremony. The return value is already ASCII hex;
+/// callers must emit it verbatim and must not hex-encode it a second time.
 pub fn transcript_fingerprint(t: &[u8; T_LEN]) -> [u8; 16] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0u8; 16];
@@ -313,8 +318,7 @@ pub fn transcript_fingerprint(t: &[u8; T_LEN]) -> [u8; 16] {
 
 // ---- base64url, no padding (hand-rolled; no new dependencies) ----
 
-const B64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Exact base64url length (no padding) for `n` input bytes.
 pub const fn b64_encoded_len(n: usize) -> usize {
@@ -349,9 +353,7 @@ fn b64_encode_into(input: &[u8], out: &mut [u8]) -> Result<usize, PairError> {
     let mut ip = 0;
     let mut op = 0;
     while ip + 3 <= input.len() {
-        let n = ((input[ip] as u32) << 16)
-            | ((input[ip + 1] as u32) << 8)
-            | (input[ip + 2] as u32);
+        let n = ((input[ip] as u32) << 16) | ((input[ip + 1] as u32) << 8) | (input[ip + 2] as u32);
         out[op] = B64_ALPHABET[((n >> 18) & 63) as usize];
         out[op + 1] = B64_ALPHABET[((n >> 12) & 63) as usize];
         out[op + 2] = B64_ALPHABET[((n >> 6) & 63) as usize];
@@ -382,7 +384,14 @@ fn b64_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize, PairError> {
         return Err(PairError::BadLength);
     }
     let main_len = input.len() - tail;
-    let need = (main_len / 4) * 3 + if tail == 2 { 1 } else if tail == 3 { 2 } else { 0 };
+    let need = (main_len / 4) * 3
+        + if tail == 2 {
+            1
+        } else if tail == 3 {
+            2
+        } else {
+            0
+        };
     if out.len() < need {
         return Err(PairError::BufferTooSmall);
     }
@@ -545,7 +554,13 @@ mod tests {
         assert_eq!(ascii_str(&text[..n]), "LMESH1:__8");
         // Every vector decodes back byte-for-byte.
         let mut raw = [0u8; 8];
-        let vectors: [&[u8]; 5] = [&[0x01], &[0x01, 0x02], &[0x01, 0x02, 0x03], &[0xFF], &[0xFF, 0xFF]];
+        let vectors: [&[u8]; 5] = [
+            &[0x01],
+            &[0x01, 0x02],
+            &[0x01, 0x02, 0x03],
+            &[0xFF],
+            &[0xFF, 0xFF],
+        ];
         for v in vectors {
             let n = transport_encode(v, &mut text).unwrap();
             let m = decode_transport(&text[..n], &mut raw).unwrap();
@@ -568,9 +583,18 @@ mod tests {
     #[test]
     fn transport_rejects_bad_prefix() {
         let mut raw = [0u8; 8];
-        assert_eq!(decode_transport(b"XXXX:AQID", &mut raw), Err(PairError::BadPrefix));
-        assert_eq!(decode_transport(b"LMESH:AQID", &mut raw), Err(PairError::BadPrefix));
-        assert_eq!(decode_transport(b"LMESH", &mut raw), Err(PairError::BadPrefix));
+        assert_eq!(
+            decode_transport(b"XXXX:AQID", &mut raw),
+            Err(PairError::BadPrefix)
+        );
+        assert_eq!(
+            decode_transport(b"LMESH:AQID", &mut raw),
+            Err(PairError::BadPrefix)
+        );
+        assert_eq!(
+            decode_transport(b"LMESH", &mut raw),
+            Err(PairError::BadPrefix)
+        );
         assert_eq!(decode_transport(b"", &mut raw), Err(PairError::BadPrefix));
     }
 
@@ -610,7 +634,10 @@ mod tests {
             Err(PairError::BadLength)
         );
         // Empty body carries no record.
-        assert_eq!(decode_transport(b"LMESH1:", &mut raw), Err(PairError::BadLength));
+        assert_eq!(
+            decode_transport(b"LMESH1:", &mut raw),
+            Err(PairError::BadLength)
+        );
         // Empty record never encodes.
         let mut text = [0u8; 16];
         assert_eq!(transport_encode(&[], &mut text), Err(PairError::BadLength));
