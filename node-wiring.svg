@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -20 1020 740" font-family="monospace">
+  <title>Three Pico 2 W LoRa nodes — node wiring (build three identical copies: A, B, C)</title>
+  <desc>Logical eight-wire connection map, not physical pad order. Use official Pico 2 W pin numbering and breakout labels. Disconnect all power before changing wiring.</desc>
+
+  <!-- Title -->
+  <rect x="-20" y="-20" width="1060" height="760" fill="#ffffff"/>
+  <text x="500" y="40" text-anchor="middle" font-size="20" font-weight="bold" fill="#111">Pico 2 W + Adafruit RFM95W #3072 — one node (build A, B, C identically)</text>
+  <!-- USB power arrow -->
+  <line x1="185" y1="52" x2="185" y2="86" stroke="#111" stroke-width="2"/>
+  <polygon points="185,94 178,82 192,82" fill="#111"/>
+  <text x="196" y="72" font-size="12" fill="#111">USB power + data (micro-USB)</text>
+
+  <!-- Pico box -->
+  <g id="pico">
+    <rect x="40" y="94" width="290" height="372" fill="#f4f4f4" stroke="#333" stroke-width="2"/>
+    <text x="185" y="118" text-anchor="middle" font-size="14" font-weight="bold" fill="#111">Raspberry Pi Pico 2 W</text>
+    <text x="185" y="136" text-anchor="middle" font-size="11" fill="#555">LOGICAL CONNECTIONS — not pad order</text>
+  </g>
+
+  <!-- Radio box -->
+  <g id="radio">
+    <rect x="590" y="94" width="290" height="372" fill="#f4f4f4" stroke="#333" stroke-width="2"/>
+    <text x="735" y="118" text-anchor="middle" font-size="14" font-weight="bold" fill="#111">Adafruit RFM95W #3072</text>
+    <text x="735" y="136" text-anchor="middle" font-size="11" fill="#555">SX1276 · not physical pad order</text>
+  </g>
+
+  <!-- Rows: y, pico label, pico sub, radio label, color, wire label -->
+  <g font-size="12">
+    <!-- 3V3 -->
+    <text x="52" y="168" fill="#111">3V3 OUT · phys 36</text>
+    <text x="828" y="168" text-anchor="end" fill="#111">VIN</text>
+    <line x1="330" y1="164" x2="590" y2="164" stroke="#c00000" stroke-width="2.5"/>
+    <text x="460" y="156" text-anchor="middle" fill="#c00000">power 3V3</text>
+    <!-- GND -->
+    <text x="52" y="208" fill="#111">GND · phys 38</text>
+    <text x="828" y="208" text-anchor="end" fill="#111">GND</text>
+    <line x1="330" y1="204" x2="590" y2="204" stroke="#111111" stroke-width="2.5"/>
+    <text x="460" y="196" text-anchor="middle" fill="#111">ground</text>
+    <!-- SCK -->
+    <text x="52" y="248" fill="#111">GP18 · phys 24</text>
+    <text x="828" y="248" text-anchor="end" fill="#111">SCK</text>
+    <line x1="330" y1="244" x2="590" y2="244" stroke="#0057b8" stroke-width="2.5"/>
+    <text x="460" y="236" text-anchor="middle" fill="#0057b8">SPI0 SCK →</text>
+    <!-- MOSI -->
+    <text x="52" y="288" fill="#111">GP19 · phys 25</text>
+    <text x="828" y="288" text-anchor="end" fill="#111">MOSI</text>
+    <line x1="330" y1="284" x2="590" y2="284" stroke="#0057b8" stroke-width="2.5"/>
+    <text x="460" y="276" text-anchor="middle" fill="#0057b8">SPI0 MOSI →</text>
+    <!-- MISO -->
+    <text x="52" y="328" fill="#111">GP16 · phys 21</text>
+    <text x="828" y="328" text-anchor="end" fill="#111">MISO</text>
+    <line x1="330" y1="324" x2="590" y2="324" stroke="#0057b8" stroke-width="2.5"/>
+    <text x="460" y="316" text-anchor="middle" fill="#0057b8">← SPI0 MISO</text>
+    <!-- CS -->
+    <text x="52" y="368" fill="#111">GP17 · phys 22</text>
+    <text x="828" y="368" text-anchor="end" fill="#111">CS</text>
+    <line x1="330" y1="364" x2="590" y2="364" stroke="#0a7a3d" stroke-width="2.5"/>
+    <text x="460" y="356" text-anchor="middle" fill="#0a7a3d">select →</text>
+    <!-- RST -->
+    <text x="52" y="408" fill="#111">GP20 · phys 26</text>
+    <text x="828" y="408" text-anchor="end" fill="#111">RST</text>
+    <line x1="330" y1="404" x2="590" y2="404" stroke="#0a7a3d" stroke-width="2.5"/>
+    <text x="460" y="396" text-anchor="middle" fill="#0a7a3d">reset →</text>
+    <!-- DIO0 -->
+    <text x="52" y="448" fill="#111">GP21 · phys 27</text>
+    <text x="828" y="448" text-anchor="end" fill="#111">G0 / DIO0</text>
+    <line x1="330" y1="444" x2="590" y2="444" stroke="#0a7a3d" stroke-width="2.5"/>
+    <text x="460" y="436" text-anchor="middle" fill="#0a7a3d">← interrupt</text>
+  </g>
+
+  <!-- Antenna -->
+  <g id="antenna">
+    <line x1="735" y1="466" x2="735" y2="492" stroke="#333" stroke-width="2"/>
+    <polyline points="735,492 727,500 743,508 727,516 743,524 727,532 743,540 735,548" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="752" y="524" font-size="12" fill="#111">ANT pad → 915 MHz antenna</text>
+    <text x="752" y="540" font-size="12" fill="#c00000">fit before any TX</text>
+  </g>
+
+  <!-- Footer notes -->
+  <g font-size="12" fill="#111">
+    <text x="40" y="580" fill="#c00000" font-weight="bold">POWER OFF before changing wires. Use the official pinout, not positions in an illustration.</text>
+    <text x="40" y="600">3V3 OUT is physical pin 36, NOT the top-right VBUS pin 40. Never connect 5 V to Pico GPIO.</text>
+    <text x="40" y="620">Only DIO0/G0 is wired. Leave DIO1 and unused pads unconnected. EN unconnected (pulled high).</text>
+    <text x="40" y="640">Ground, then 3V3, then signals. Keep SPI short and away from antenna. No wires between A / B / C.</text>
+    <text x="40" y="660">No Wi-Fi / Bluetooth / GPS / UWB setup. Antenna and electrical checks required before any TX.</text>
+  </g>
+
+  <!-- Legend -->
+  <g font-size="12" transform="translate(0 140)">
+    <line x1="40" y1="546" x2="70" y2="546" stroke="#c00000" stroke-width="2.5"/>
+    <text x="76" y="550" fill="#111">power</text>
+    <line x1="140" y1="546" x2="170" y2="546" stroke="#111111" stroke-width="2.5"/>
+    <text x="176" y="550" fill="#111">ground</text>
+    <line x1="250" y1="546" x2="280" y2="546" stroke="#0057b8" stroke-width="2.5"/>
+    <text x="286" y="550" fill="#111">SPI0</text>
+    <line x1="340" y1="546" x2="370" y2="546" stroke="#0a7a3d" stroke-width="2.5"/>
+    <text x="376" y="550" fill="#111">control / interrupt</text>
+  </g>
+</svg>
