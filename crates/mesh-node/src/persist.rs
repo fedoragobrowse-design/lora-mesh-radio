@@ -1,7 +1,16 @@
+//! Backwards-compatibility contract (all future releases MUST honor):
+//! - `PERSIST_MAGIC` + `PERSIST_VERSION` gate every record; unknown
+//!   versions and length mismatches fail closed, never reinterpreted.
+//! - V(n+1) decoders MUST accept V(n) record lengths (V1/V2 2-slot records
+//!   migrate by zero-filling new slots, then canonical re-encode).
+//! - `CONTACT_BYTES` grows by appending fields only; existing offsets are
+//!   frozen. Add a migration test per version bump.
+//! - Existing USB error strings are frozen wire contract (`CONTACT_BLOCKED`
+//!   means the engine flag is set; stale-token cancel is `BUSY`).
+//!
 //! Byte-identical persisted node encoding shared by firmware
 //! (sequential-storage value bytes) and the native exerciser (files).
 //! Fixed-size, versioned, big-endian; unknown versions fail closed.
-
 use crate::engine::MAX_CONTACTS;
 
 pub const PERSIST_MAGIC: [u8; 4] = *b"LMSH";

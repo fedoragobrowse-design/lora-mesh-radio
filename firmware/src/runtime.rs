@@ -569,8 +569,20 @@ impl<'a, E: Entropy> Runtime<'a, E> {
                         self.emit_err(send.reply_id, usb::err::CHANNEL_BUSY);
                     }
                     Err(TxFault::Cancelled) => {
+                        // Cancelled conflates radio-off, still-blocked, and
+                        // stale-token (policy generation moved under an
+                        // already-authorized send, e.g. an unblock or radio
+                        // cycle between token mint and pre-TX check). Report
+                        // honestly: only claim CONTACT_BLOCKED when the
+                        // engine flag is still set; otherwise BUSY so the
+                        // host retries with a fresh token instead of
+                        // concluding the contact is blocked.
                         self.usb.engine.send_complete(false);
-                        self.emit_err(send.reply_id, usb::err::CONTACT_BLOCKED);
+                        if self.usb.engine.contact_blocked(send.contact_id) {
+                            self.emit_err(send.reply_id, usb::err::CONTACT_BLOCKED);
+                        } else {
+                            self.emit_err(send.reply_id, usb::err::BUSY);
+                        }
                     }
                     Err(TxFault::Radio) => {
                         self.usb.engine.send_complete(false);
