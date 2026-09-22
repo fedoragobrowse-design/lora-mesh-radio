@@ -2,6 +2,11 @@
 name = "mesh-core"
 version = "0.1.0"
 edition = "2021"
+[features]
+default = []
+# INSECURE-only Meshtastic receive-parser (decode-only, no encode/send/PSK).
+# Off by default; never auto-enabled. See src/compat.rs.
+meshtastic = []
 
 [dependencies]
 chacha20poly1305 = { version = "0.10.1", default-features = false }

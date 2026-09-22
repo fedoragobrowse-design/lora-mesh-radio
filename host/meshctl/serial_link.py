@@ -292,8 +292,11 @@ class SerialSession:
             if remaining <= 0:
                 return None
             try:
+                # Read a full chunk unconditionally: gating on in_waiting
+                # starves the board's 64-byte USB TX (1-byte reads NAK-storm
+                # the endpoint and the reply tail never arrives).
                 ser.timeout = min(READ_CHUNK, remaining)
-                self._pending += ser.read(min(max(ser.in_waiting, 1), 1024))
+                self._pending += ser.read(1024)
             except OSError as exc:
                 raise TimeoutError(f"serial error: {exc}") from exc
 

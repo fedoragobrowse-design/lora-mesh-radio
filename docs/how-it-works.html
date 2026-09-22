@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How the three-node LoRa mesh works</title>
+<style>
+  :root{
+    --paper:#E9EDEE;
+    --card:#F5F7F8;
+    --ink:#1C2B33;
+    --soft:#43565F;
+    --wash:#D8E0E4;
+    --copper:#A84E1C;
+    --pine:#1E5B4F;
+    --gold:#8A6D1B;
+    --line:#B9C4C9;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; color:var(--ink); background:var(--paper);
+    font-family:Georgia,"Times New Roman",serif;
+    font-size:17px; line-height:1.68;
+  }
+  .wrap{max-width:1180px; margin:0 auto; padding:0 22px 90px}
+  /* Hero: one memorable thing — the chirp field */
+  .hero{
+    margin:26px 0 30px; background:var(--ink); color:#F2F4F4;
+    border-radius:14px; overflow:hidden;
+  }
+  .hero svg{display:block; width:100%; height:auto}
+  .hero-body{padding:8px 30px 26px; max-width:68ch}
+  .hero-body h1{
+    font-family:"Arial Narrow","Helvetica Neue",Arial,sans-serif;
+    font-weight:800; letter-spacing:-0.015em; line-height:1.04;
+    font-size:clamp(2rem,4.6vw,3.3rem); margin:.35em 0 .3em;
+  }
+  .hero-body p{margin:.5em 0; color:#D9E0E3}
+  .hero-body code{color:#FFD9A8}
+  .sweep{animation:sweep 5s linear infinite}
+  @keyframes sweep{0%{transform:translateX(-40px);opacity:0}12%{opacity:1}85%{opacity:1}100%{transform:translateX(1050px);opacity:0}}
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto}
+    .sweep{animation:none}
+  }
+  .layout{display:grid; grid-template-columns:230px minmax(0,1fr); gap:30px; align-items:start}
+  @media (max-width:900px){.layout{grid-template-columns:1fr}}
+  nav.rail{position:sticky; top:16px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; font-family:Arial,Helvetica,sans-serif; font-size:14px}
+  @media (max-width:900px){nav.rail{position:static}}
+  nav.rail h2{font-size:15px; margin:2px 0 8px}
+  nav.rail ol{margin:0; padding-left:20px}
+  nav.rail li{margin:3px 0}
+  nav.rail a{color:var(--pine); text-decoration:none}
+  nav.rail a:hover{text-decoration:underline}
+  nav.rail a:focus-visible{outline:3px solid var(--copper); outline-offset:2px}
+  main.doc{min-width:0}
+  section.block{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px 26px; margin:0 0 20px}
+  h2.sec{
+    font-family:"Arial Narrow","Helvetica Neue",Arial,sans-serif;
+    font-size:1.55rem; letter-spacing:-0.01em; margin:.1em 0 .5em;
+    border-bottom:3px solid var(--copper); padding-bottom:.25em;
+  }
+  h3{
+    font-family:Arial,Helvetica,sans-serif; font-size:1.02rem; margin:1.4em 0 .4em;
+    color:var(--pine);
+  }
+  p{max-width:72ch}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.86em; background:var(--wash); padding:.1em .35em; border-radius:5px}
+  pre{background:var(--ink); color:#EDEFF0; border-radius:10px; padding:14px 16px; overflow:auto; font-size:13.5px; line-height:1.55}
+  pre code{background:none; color:inherit; padding:0}
+  table{border-collapse:collapse; width:100%; font-family:Arial,Helvetica,sans-serif; font-size:14px; margin:12px 0}
+  th,td{border:1px solid var(--line); padding:7px 9px; text-align:left; vertical-align:top}
+  th{background:var(--wash)}
+  td.num{text-align:right; font-variant-numeric:tabular-nums}
+  .kicker{font-family:Arial,Helvetica,sans-serif; color:var(--soft); font-size:14px}
+  .warn{border-left:5px solid var(--copper); background:#FBF1E8; padding:10px 14px; border-radius:0 8px 8px 0; font-family:Arial,Helvetica,sans-serif; font-size:14.5px}
+  .ok{border-left:5px solid var(--pine); background:#E7F1ED; padding:10px 14px; border-radius:0 8px 8px 0; font-family:Arial,Helvetica,sans-serif; font-size:14.5px}
+  details{border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin:8px 0; background:#fff; font-family:Arial,Helvetica,sans-serif; font-size:14.5px}
+  details summary{cursor:pointer; font-weight:bold; color:var(--pine)}
+  a{color:var(--copper)}
+  a:focus-visible{outline:3px solid var(--copper); outline-offset:2px}
+  footer.foot{color:var(--soft); font-family:Arial,Helvetica,sans-serif; font-size:13.5px; padding:18px 4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <svg viewBox="0 0 1000 240" role="img" aria-label="Three nodes A, B and C with a LoRa chirp sweeping across the band">
+      <rect x="0" y="0" width="1000" height="240" fill="#1C2B33"/>
+      <g stroke="#3A4E59" stroke-width="1">
+        <line x1="0" y1="60" x2="1000" y2="60"/>
+        <line x1="0" y1="120" x2="1000" y2="120"/>
+        <line x1="0" y1="180" x2="1000" y2="180"/>
+      </g>
+      <g class="sweep">
+        <line x1="0" y1="200" x2="120" y2="40" stroke="#C9A227" stroke-width="3"/>
+        <line x1="14" y1="200" x2="134" y2="40" stroke="#A84E1C" stroke-width="2"/>
+      </g>
+      <g font-family="Arial,sans-serif" font-size="22" font-weight="bold" text-anchor="middle">
+        <circle cx="180" cy="150" r="26" fill="#1E5B4F"/>
+        <text x="180" y="158" fill="#fff">A</text>
+        <circle cx="500" cy="90" r="26" fill="#1E5B4F"/>
+        <text x="500" y="98" fill="#fff">B</text>
+        <circle cx="820" cy="150" r="26" fill="#1E5B4F"/>
+        <text x="820" y="158" fill="#fff">C</text>
+      </g>
+      <g font-family="Arial,sans-serif" font-size="14" fill="#9FB2BA" text-anchor="middle">
+        <text x="500" y="220">915 MHz, SF7, BW500, sync 0x12, +2 dBm, one hop at a time</text>
+      </g>
+    </svg>
+    <div class="hero-body">
+      <h1>How the three-node LoRa mesh works</h1>
+      <p>Three Raspberry Pi Pico 2 W boards, three SX1276 radios, one private mesh. No towers, no accounts, no cloud. Every message is encrypted on the sending board and can only be read on the receiving board. Relays in the middle move sealed envelopes they cannot open.</p>
+      <p>This guide follows a message from fingertip to air and back: hardware, radio settings, frame bytes, cryptography, pairing, storage, firmware tasks, host tools, installer, tests, and daily operation.</p>
+    </div>
+  </div>
+
+  <div class="layout">
+  <nav class="rail" aria-label="Guide sections">
+    <h2>Sections</h2>
+    <ol>
+      <li><a href="#idea">The idea in one page</a></li>
+      <li><a href="#hardware">Hardware and wiring</a></li>
+      <li><a href="#rf">Radio profile</a></li>
+      <li><a href="#frame">Frame bytes</a></li>
+      <li><a href="#security">Encryption and keys</a></li>
+      <li><a href="#pairing">Pairing new contacts</a></li>
+      <li><a href="#engine">Node engine</a></li>
+      <li><a href="#persist">What survives reboot</a></li>
+      <li><a href="#firmware">Firmware tasks</a></li>
+      <li><a href="#wire">USB and TCP wire</a></li>
+      <li><a href="#host">Host tools</a></li>
+      <li><a href="#installer">Web installer</a></li>
+      <li><a href="#tests">Test scripts</a></li>
+      <li><a href="#compat">Meshtastic note</a></li>
+      <li><a href="#operate">Daily operation</a></li>
+      <li><a href="#limits">Limits and non-goals</a></li>
+      <li><a href="#files">File map</a></li>
+    </ol>
+  </nav>
+
+  <main class="doc">
+
+  <section class="block" id="idea">
+    <h2 class="sec">The idea in one page</h2>
+    <p>Each operator owns one node labelled A, B, or C. Labels are convenience names for humans; the air never trusts them. When A sends to B, A's firmware seals the text with a key only A and B share, addresses the frame to B's current hourly alias, and transmits at the lowest power the radio supports (+2 dBm). B answers with an encrypted acknowledgement. If B is out of range, C can forward the sealed frame once, without reading it.</p>
+    <h3>Trust boundaries</h3>
+    <table>
+      <tr><th>Zone</th><th>Sees plaintext</th><th>Sees sealed bytes</th></tr>
+      <tr><td>Sending and receiving firmware</td><td>Yes, its own ends</td><td>Yes</td></tr>
+      <tr><td>Relaying firmware</td><td>No</td><td>Yes, header plus opaque body</td></tr>
+      <tr><td>Host computer (Python tools)</td><td>Typed text and received text</td><td>Opaque pairing records only</td></tr>
+      <tr><td>Passive radio listener</td><td>No</td><td>Yes, but authentication fails without keys</td></tr>
+    </table>
+    <p class="kicker">Cryptography lives in Rust on the board. Python never agrees keys and never encrypts. That single-implementation rule is what keeps every node byte-identical.</p>
+  </section>
+
+  <section class="block" id="hardware">
+    <h2 class="sec">Hardware and wiring</h2>
+    <p>Three identical nodes. Each node is a Raspberry Pi Pico 2 W (RP2350) wired over SPI to an Adafruit RFM95W breakout (Semtech SX1276), with a 915 MHz antenna on the breakout's antenna pad. There are no wires between nodes. Power is USB only.</p>
+    <table>
+      <tr><th>Pico signal</th><th>Physical pin</th><th>Breakout pad</th><th>Job</th></tr>
+      <tr><td>3V3 OUT</td><td class="num">36</td><td>VIN</td><td>Regulated 3.3 V supply</td></tr>
+      <tr><td>GND</td><td class="num">38</td><td>GND</td><td>Common reference</td></tr>
+      <tr><td>GP18</td><td class="num">24</td><td>SCK</td><td>SPI0 clock, Pico to radio</td></tr>
+      <tr><td>GP19</td><td class="num">25</td><td>MOSI</td><td>SPI0 data, Pico to radio</td></tr>
+      <tr><td>GP16</td><td class="num">21</td><td>MISO</td><td>SPI0 data, radio to Pico</td></tr>
+      <tr><td>GP17</td><td class="num">22</td><td>CS</td><td>Chip select, active low</td></tr>
+      <tr><td>GP20</td><td class="num">26</td><td>RST</td><td>Reset, active low pulse</td></tr>
+      <tr><td>GP21</td><td class="num">27</td><td>G0 / DIO0</td><td>TX-done, RX-done, CAD-done interrupt</td></tr>
+    </table>
+    <p>Only DIO0 is wired. DIO1 is not needed for this protocol. Leave the breakout's EN pin unconnected (it pulls high internally). SPI runs at 1 MHz during bring-up. Use GPIO numbers from the silkscreen, never physical pin counts, and verify with the official Pico 2 W pinout before powering.</p>
+    <div class="warn"><strong>Antenna rule.</strong> Fit an antenna on every radio before any transmission. Transmitting with no antenna can destroy the power amplifier. Check continuity end to end with power off, and confirm there is no short between 3V3 and ground.</div>
+  </section>
+
+  <section class="block" id="rf">
+    <h2 class="sec">Radio profile</h2>
+    <p>Every node uses one frozen profile, compiled in as <code>firmware/src/radio.rs</code> constants. Nothing tunes it at runtime.</p>
+    <table>
+      <tr><th>Setting</th><th>Value</th><th>Why</th></tr>
+      <tr><td>Frequency</td><td>915.0 MHz</td><td>US ISM band center for this mesh</td></tr>
+      <tr><td>Spreading factor</td><td>SF7</td><td>Fastest, shortest airtime</td></tr>
+      <tr><td>Bandwidth</td><td>BW500</td><td>Widest SX1276 setting, shortest airtime</td></tr>
+      <tr><td>Coding rate</td><td>CR4/5</td><td>Lightest error coding</td></tr>
+      <tr><td>Preamble</td><td>8 symbols</td><td>Short wake-up</td></tr>
+      <tr><td>Sync word</td><td>0x12 (private)</td><td>Receivers with other sync words treat frames as noise</td></tr>
+      <tr><td>TX power</td><td>+2 dBm, always</td><td>SX1276 PA_BOOST minimum; no override exists in code</td></tr>
+      <tr><td>Listen before talk</td><td>Channel Activity Detection, up to 5 tries</td><td>Backoff doubles per try, capped at 800 ms, with 20 to 100 ms initial jitter</td></tr>
+      <tr><td>Relay scope</td><td>One hop, 100 to 300 ms jittered delay</td><td>64-entry cache, 8 s entry life, first reception only</td></tr>
+    </table>
+    <p class="kicker">Short airtime is a privacy feature here: fewer milliseconds on air means a smaller window for direction finding and collisions.</p>
+  </section>
+
+  <section class="block" id="frame">
+    <h2 class="sec">Frame bytes</h2>
+    <p>Everything on air fits in 255 bytes. A 28-byte header names the envelope, a variable body carries the payload, and a 2-byte CRC guards the trip. The body-length byte sits at offset 27 and counts the 16-byte authentication tag in secure mode.</p>
+    <table>
+      <tr><th>Bytes</th><th>Field</th><th>Meaning</th></tr>
+      <tr><td class="num">0</td><td>Version</td><td>0 for lab plaintext, 1 for secure</td></tr>
+      <tr><td class="num">1</td><td>Flags</td><td>Only bit 0 used: want acknowledgement</td></tr>
+      <tr><td class="num">2 to 5</td><td>To</td><td>4-byte hourly alias of the destination</td></tr>
+      <tr><td class="num">6 to 9</td><td>From</td><td>4-byte hourly alias of the sender</td></tr>
+      <tr><td class="num">10 to 13</td><td>Packet ID</td><td>Random per message, mixed from the hardware random generator</td></tr>
+      <tr><td class="num">14</td><td>Hops</td><td>1 when sent, 0 after one relay, never forwarded again</td></tr>
+      <tr><td class="num">15 to 18</td><td>Epoch</td><td>Hour number since the Unix epoch</td></tr>
+      <tr><td class="num">19 to 26</td><td>Sequence</td><td>Per-contact counter, reserved in blocks of 32</td></tr>
+      <tr><td class="num">27</td><td>Body length</td><td>Body bytes that follow</td></tr>
+      <tr><td class="num">28…</td><td>Body</td><td>Plaintext lab body, or sealed secure body</td></tr>
+      <tr><td>last 2</td><td>CRC-16/CCITT-FALSE</td><td>Integrity check over header plus body</td></tr>
+    </table>
+    <h3>Sizes that matter</h3>
+    <table>
+      <tr><th>Kind</th><th>Total on air</th><th>Body</th></tr>
+      <tr><td>Secure text message</td><td>Up to 207 bytes</td><td>Up to 177 bytes including tag; typed text up to 160 UTF-8 bytes</td></tr>
+      <tr><td>Secure acknowledgement</td><td>63 bytes</td><td>33 bytes naming epoch, sequence, and packet ID</td></tr>
+    </table>
+    <p>Decoding is strict: unknown versions, stray flag bits, hops above 1, length mismatches, bad CRC, malformed lab bodies, and wrong acknowledgement shapes are rejected. Secure bodies stay opaque until the receiving endpoint authenticates them, then the decrypted bytes are validated the same strict way.</p>
+  </section>
+
+  <section class="block" id="security">
+    <h2 class="sec">Encryption and keys</h2>
+    <p>Each pair of contacts shares one 32-byte root secret established at pairing. Everything else is derived from it with HKDF-SHA256 under distinct labels, so traffic keys, address keys, and confirmation keys never overlap.</p>
+    <h3>Hourly traffic keys</h3>
+    <p>For each hour, each direction gets a fresh key: <code>HKDF(root, "LMESH-hour-v1" || hour)</code>. Messages are sealed with ChaCha20-Poly1305. The nonce is the hour plus the sequence number, so it never repeats within a key's lifetime. The authentication covers the immutable header plus the body, which is why a relay cannot alter addresses or replay bytes without the receiving endpoint rejecting them.</p>
+    <h3>Hourly addresses</h3>
+    <p>Aliases rotate every hour: <code>first_4(HMAC(secret, "LMESH-addr-v1" || identity || hour))</code>. A relay sees aliases change but cannot link them without the secret. Four bytes can theoretically collide; the cryptography decides identity on decryption, never the alias match alone.</p>
+    <h3>Replay defense</h3>
+    <p>Each contact keeps sliding windows of recently seen sequence numbers for messages and acknowledgements, plus an anchor hour that only moves forward with trusted local time. A duplicate, a late retry outside the window, or a frame from a distant hour is dropped. Sequence numbers are reserved in durable blocks of 32 before use, and the whole last block is skipped after a reboot, so a power cut can never reuse a nonce.</p>
+    <p class="kicker">ChaCha20-Poly1305 was chosen because the RP2350 has no AES accelerator; software AES there is slower and harder to keep constant-time.</p>
+  </section>
+
+  <section class="block" id="pairing">
+    <h2 class="sec">Pairing new contacts</h2>
+    <p>Pairing happens in person with radios off. The boards exchange three records through QR codes and files carried by the host computer. The host only transports opaque text; it never sees keys.</p>
+    <table>
+      <tr><th>Step</th><th>Record</th><th>What it carries</th></tr>
+      <tr><td>Offer</td><td>98 bytes</td><td>Version, long-term signing key, fresh ephemeral key, fresh challenge</td></tr>
+      <tr><td>Proof</td><td>122 bytes</td><td>Transcript hash, role byte, sealed identity, signature</td></tr>
+      <tr><td>Confirmation</td><td>66 bytes</td><td>Transcript hash, role byte, confirmation code</td></tr>
+    </table>
+    <p>Each record travels as <code>LMESH1:</code> followed by unpadded base64url, shown as a QR PNG. Both operators compare the 16-character transcript fingerprint on their screens before confirming; on any mismatch the pairing is abandoned, never auto-accepted. One attempt is pending per board at a time, expiring after 10 minutes. Restarts discard temporary secrets, so resuming needs fresh offers.</p>
+    <div class="warn"><strong>Radio-off precondition.</strong> Pairing commands refuse to run while the radio is enabled, and report <code>RADIO_MUST_BE_OFF</code>. Keys are never exchanged over the air.</div>
+  </section>
+
+  <section class="block" id="engine">
+    <h2 class="sec">Node engine</h2>
+    <p><code>crates/mesh-node/src/engine.rs</code> is the transport-independent brain shared by firmware and host tests. It owns the pairing ceremony state, encrypted send and receive, relay decisions, blocking, and the durability contract. It is <code>no_std</code>, uses fixed buffers, and wipes secrets when done.</p>
+    <h3>Durability contract</h3>
+    <p>Every mutation with a visible effect is staged into a snapshot first. The caller writes the snapshot to flash, then calls <code>commit_ok</code>. Only then does the engine emit the frame or delivery event. An interrupted write can therefore never reuse a nonce, clear a replay window, or resurrect a retired hour.</p>
+    <h3>Send path</h3>
+    <p>Begin reserves a sequence number and stages the snapshot. The firmware commits it, transmits with channel detection, and waits up to 12 seconds for the acknowledgement, retrying at most 3 times. Completion, failure, channel-busy, and cancellation each produce an honest report; nothing claims success without an acknowledgement.</p>
+    <h3>Receive path</h3>
+    <p>Frames authenticate against each contact's directional keys across the current and adjacent hours. On success the endpoint validates the decrypted body, advances replay state, queues its own acknowledgement as a fresh envelope with an independent packet ID, and either delivers the text or schedules one relay forward. Relays without keys run structural checks only and forward opaque bytes.</p>
+    <h3>Blocking</h3>
+    <p>Blocking is local to the board: a blocked contact cannot send or complete, and the policy gate invalidates its transmit tokens immediately. There is no network-wide ban and no automatic beaconing, both deliberately rejected as incompatible with the privacy goals.</p>
+  </section>
+
+  <section class="block" id="persist">
+    <h2 class="sec">What survives reboot</h2>
+    <p>The top 64 KiB of the 4 MiB flash holds a sequential-storage map with three independent keys. Firmware code is capped below it at link time, so code can never overlap storage.</p>
+    <table>
+      <tr><th>Key</th><th>Record</th><th>Contents</th></tr>
+      <tr><td>0x01 node</td><td>LMSH v3, about 3.5 KiB</td><td>Provisioning, label, identity keys, clock floor, 16 contact slots with roots, sequence reservations, replay windows</td></tr>
+      <tr><td>0x02 settings</td><td>LSET, 13 bytes</td><td>Tunable transmit and relay parameters with clamped ranges</td></tr>
+      <tr><td>0x03 wifi</td><td>WSET, 102 bytes</td><td>SSID and passphrase in plaintext flash (readable with physical access; never logged or printed)</td></tr>
+    </table>
+    <p>Old two-slot records migrate by zero-filling the new slots and re-encoding canonically. Unknown magic or versions fail closed to a fault state that disables secure operations rather than regenerating keys quietly. The clock itself is RAM-only: every boot starts unset until the USB computer sets trusted UTC, and time can never move backwards past the highest transmitted hour.</p>
+  </section>
+
+  <section class="block" id="firmware">
+    <h2 class="sec">Firmware tasks</h2>
+    <p>Two images are built from one source tree with the Embassy async framework on the RP2350.</p>
+    <table>
+      <tr><th>Image</th><th>Build</th><th>Behavior</th></tr>
+      <tr><td>radio-secure (default)</td><td>radio feature</td><td>Initializes SPI and SX1276, serves USB plus optional WiFi TCP, sends and relays at +2 dBm</td></tr>
+      <tr><td>radio-free (bench)</td><td>default</td><td>Never touches radio pins; pairing, contacts, and clock work; every RF call answers unavailable</td></tr>
+    </table>
+    <h3>Task ownership</h3>
+    <table>
+      <tr><th>File</th><th>Owns</th></tr>
+      <tr><td>main.rs</td><td>Boot order, Embassy tasks, USB device, radio and WiFi task spawning</td></tr>
+      <tr><td>board.rs</td><td>Fixed pin map and interrupt bindings</td></tr>
+      <tr><td>radio.rs</td><td>SX1276 bring-up, channel detection, transmit, continuous receive, policy gate, bounded queues of depth 8</td></tr>
+      <tr><td>runtime.rs</td><td>Engine ownership, send and acknowledgement tracking, retries, relay scheduling, storage commits, USB replies</td></tr>
+      <tr><td>storage.rs</td><td>Single flash owner; serializes load and commit, never cancels a write mid-flight</td></tr>
+      <tr><td>usb.rs</td><td>Newline JSON dispatch for every operator command, strict request validation, reply rendering</td></tr>
+      <tr><td>wifi.rs</td><td>CYW43 WiFi join and TCP server on port 7777 carrying the same JSON wire as USB</td></tr>
+      <tr><td>led.rs</td><td>Status LED only, never a wireless subsystem by itself</td></tr>
+    </table>
+    <h3>Boot order</h3>
+    <p>Load persisted state, then settings, then the WiFi credential. Initialize the hardware random generator, detect the radio over SPI, start the WiFi task, the radio task, and the runtime task, then serve USB. Replies terminate every line with a newline byte; a missing terminator once stalled every radio-image reply and is now covered by an explicit write after the chunk loop.</p>
+    <details><summary>Operator commands on USB</summary>
+      status, contacts, provision, time set, time status, radio on, radio off, radio arm-next-boot, ping, send, block, unblock, contact delete, pair offer, pair proof, pair confirm, pair import, settings get, settings set, wifi status, wifi set, wifi forget.
+    </details>
+  </section>
+
+  <section class="block" id="wire">
+    <h2 class="sec">USB and TCP wire</h2>
+    <p>Host and board speak newline-delimited JSON. Each request carries an integer <code>id</code> and a string <code>op</code>; replies echo the <code>id</code> with <code>ok</code> plus a result or an error string. Asynchronous receive events carry <code>event</code> instead. Request lines are capped at 1024 bytes; replies at 4096.</p>
+    <pre><code>{"id": 1, "op": "status"}
+{"id": 1, "ok": true, "result": {"label": "C", "image": "radio-secure", ...}}</code></pre>
+    <p>One process owns a port at a time through a lock file; a second opener gets <code>PORT_BUSY</code>. Deadlines are bounded (5 seconds default, up to 120 for long sends) so a silent peer cannot hang the operator. The WiFi TCP server on port 7777 carries the identical wire for untethered use. Error strings are frozen contract: <code>BAD_REQUEST</code>, <code>CONTACT_BLOCKED</code>, <code>RADIO_UNAVAILABLE</code>, <code>RADIO_MUST_BE_OFF</code>, <code>STORAGE_FAULT</code>, <code>UNKNOWN_OP</code>, <code>PORT_BUSY</code>, <code>LINE_TOO_LONG</code>.</p>
+  </section>
+
+  <section class="block" id="host">
+    <h2 class="sec">Host tools</h2>
+    <p><code>meshctl</code> is the Python terminal interface. It holds no keys: it frames bytes, moves opaque pairing records between firmware and QR PNG files, and reads or types plaintext.</p>
+    <table>
+      <tr><th>Module</th><th>Job</th></tr>
+      <tr><td>serial_link.py</td><td>Port ownership, request framing, reply matching amid interleaved events, bounded deadlines</td></tr>
+      <tr><td>transports</td><td>USB CDC sessions and TCP sessions behind one switch</td></tr>
+      <tr><td>pairing.py</td><td>LMESH1 record validation, QR PNG writing and reading, fingerprint display</td></tr>
+      <tr><td>history.py</td><td>Private per-port SQLite message history</td></tr>
+      <tr><td>contacts.py</td><td>Operator display names mapped by USB serial, 1 to 32 characters</td></tr>
+      <tr><td>tui.py</td><td>Station console: roster, traffic log, key line, multi-board chat</td></tr>
+      <tr><td>compat.py</td><td>Receive-only public-protocol parser for display (proposal, never bridged)</td></tr>
+    </table>
+    <p>Boards are identified by matched <code>status</code> labels, never by USB device numbers, which shift across reboots. Pairing images, diagnostic captures, and plaintext history live under <code>.mesh-local/</code> and stay out of version control.</p>
+  </section>
+
+  <section class="block" id="installer">
+    <h2 class="sec">Web installer</h2>
+    <p><code>web-installer/</code> is a static page with no build step. It lists releases from <code>releases.json</code>, each with a file URL and SHA-256 hash so the download is verified before copying. Flashing is a file copy onto the BOOTSEL mass-storage volume; the board reboots itself when the copy finishes. Serve the directory over plain HTTP on localhost. The page states plainly that the private mesh is the default and that any compatibility mode would be labelled insecure and is never enabled here.</p>
+  </section>
+
+  <section class="block" id="tests">
+    <h2 class="sec">Test scripts</h2>
+    <p>Run regression first, then the focused scripts for diagnosis. The mesh scripts take no port arguments: boards are discovered by USB identifiers and matched by live <code>status</code> labels.</p>
+    <table>
+      <tr><th>Script</th><th>Proves</th></tr>
+      <tr><td>mesh_regression.py</td><td>Three boards present and provisioned, all six directed legs acknowledge exactly once, bad slots fail without airtime, quiet radios stay quiet</td></tr>
+      <tr><td>mesh_allways.py</td><td>Explicit per-edge send matrix, overridable per direction with slot numbers</td></tr>
+      <tr><td>mesh_adversarial.py</td><td>1-byte and 160-byte boundaries, oversize and empty rejection, hostile bytes, blocking, five-message burst with exact-once delivery</td></tr>
+      <tr><td>radio_smoke.py, radio_link.py, radio_silence.py</td><td>Single-purpose bring-up, link, and silence checks for one board or one pair</td></tr>
+    </table>
+    <p>Retry posture is 3 attempts with 12-second acknowledgement waits. Radios are left off after regression; re-enable per board before manual operation. Native Rust tests cover framing, cryptography, pairing codecs, replay windows, relay cache, and clock rules without hardware.</p>
+  </section>
+
+  <section class="block" id="compat">
+    <h2 class="sec">Meshtastic note</h2>
+    <p>Compatibility with the public Meshtastic protocol is proposal only. The physics verdict stands: same-radio interoperation is impossible, because frequency, spreading factor, bandwidth, preamble, and sync word all differ (915.0 vs 906.875 MHz, SF7 vs SF11, BW500 vs BW250, 8 vs 16 preamble symbols, private 0x12 vs public sync). One radio hears the other mesh as noise. A bridge would need a second dedicated radio, host-side display policy, and explicit insecure labelling, and transmit from our side is not proposed.</p>
+    <p>What exists is a decode-only helper (<code>crates/mesh-core/src/compat.rs</code>, behind a non-default feature) plus a host receive-only parser. Compat bytes travel inside an authenticated private message and are decoded only after endpoint decryption. It adds no transmit path, no shared-key handling, and no bridging.</p>
+  </section>
+
+  <section class="block" id="operate">
+    <h2 class="sec">Daily operation</h2>
+    <table>
+      <tr><th>Task</th><th>Commands</th></tr>
+      <tr><td>Check a board</td><td><code>meshctl --port /dev/ttyACM0 status</code></td></tr>
+      <tr><td>First-time identity</td><td><code>provision --label A</code>, then <code>time set --utc now</code></td></tr>
+      <tr><td>Pair two boards</td><td>Radios off both sides, <code>pair offer</code> each way, exchange PNGs, compare fingerprints, <code>pair proof</code>, <code>pair confirm</code>, <code>pair import</code></td></tr>
+      <tr><td>Send text</td><td><code>send --contact B --text "hello"</code>, expect <code>ACKNOWLEDGED</code>; receiver sees a <code>received</code> event</td></tr>
+      <tr><td>Check the air</td><td><code>status</code> counters: attempts, acknowledgements, receives, CRC failures, replay drops, forwards</td></tr>
+      <tr><td>Silence a contact</td><td><code>block NAME</code> and <code>unblock NAME</code>; blocked sends fail closed with zero airtime</td></tr>
+      <tr><td>Join WiFi</td><td><code>wifi set --ssid NET --pass SECRET</code>, then <code>--transport tcp --tcp-host &lt;board-ip&gt;</code></td></tr>
+      <tr><td>Leave no trace on air</td><td><code>radio off</code> before pairing or transport; radios stay off after regression runs</td></tr>
+    </table>
+    <div class="ok"><strong>Healthy signs.</strong> Replies arrive in about a second, counters move only on real traffic, fingerprints match on both sides before confirmation, and quiet radios keep every counter still.</div>
+  </section>
+
+  <section class="block" id="limits">
+    <h2 class="sec">Limits and non-goals</h2>
+    <p>No store-and-forward: an unreachable recipient fails after retries rather than queueing. No beacons, no network-wide bans, no GPS or ranging in this build. Clocks need the USB computer after every long power-off. WiFi credentials sit in plaintext flash, so physical access means credential access; the design documents that rather than hiding it. Home routers with device approval lists may refuse the boards entirely; USB remains the primary path and loses nothing. US operation is unlicensed under FCC Part 15 at this power and duty cycle, but configured bandwidth and power settings are not a substitute for calibrated measurement or certification.</p>
+  </section>
+
+  <section class="block" id="files">
+    <h2 class="sec">File map</h2>
+    <table>
+      <tr><th>Path</th><th>Holds</th></tr>
+      <tr><td>three-pico-lora-plan.md</td><td>Approved build plan, phases 0 to 5, wiring authority</td></tr>
+      <tr><td>crates/mesh-core/src</td><td>frame, security, pairing, relay, clock, compat (feature-gated)</td></tr>
+      <tr><td>crates/mesh-node/src</td><td>engine, persist, settings</td></tr>
+      <tr><td>crates/mesh-exerciser</td><td>Native exercised engine without hardware</td></tr>
+      <tr><td>firmware/src</td><td>main, board, radio, runtime, storage, usb, wifi, led</td></tr>
+      <tr><td>firmware/firmware-blobs</td><td>Vendored WiFi firmware images</td></tr>
+      <tr><td>host/meshctl</td><td>CLI, transports, pairing, history, contacts, TUI, compat parser</td></tr>
+      <tr><td>host/tests</td><td>Host-side unit tests (18 passing)</td></tr>
+      <tr><td>scripts</td><td>Regression, all-directions, adversarial, smoke, link, silence</td></tr>
+      <tr><td>web-installer</td><td>Static flashing page, release manifest, setup script</td></tr>
+      <tr><td>docs/meshtastic-compat.md</td><td>Compatibility proposal and physics verdict</td></tr>
+      <tr><td>node-wiring.svg</td><td>Wiring diagram (logical, not pad order)</td></tr>
+      <tr><td>.mesh-local</td><td>Private runtime state: locks, history databases, pairing captures (git-ignored)</td></tr>
+    </table>
+  </section>
+
+  </main>
+  </div>
+
+  <footer class="foot">
+    Single source of truth is the repository itself: the plan, the module headers, and the bench results. When this guide and the code disagree, the code wins and this guide needs an edit.
+  </footer>
+
+</div>
+</body>
+</html>

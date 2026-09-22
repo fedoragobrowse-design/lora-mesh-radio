@@ -126,7 +126,8 @@ pub enum StorageResp {
 }
 
 pub type StorageChannel = Channel<CriticalSectionRawMutex, StorageReq, 2>;
-pub type StorageRespChannel = Channel<CriticalSectionRawMutex, StorageResp, 2>;
+/// Depth 4: one `Load` serves three responses (node + settings + wifi).
+pub type StorageRespChannel = Channel<CriticalSectionRawMutex, StorageResp, 4>;
 
 /// Single async owner of flash. Construct once in `main` from the flash
 /// peripheral + DMA_CH2, then `run()` forever serving [`StorageReq`].

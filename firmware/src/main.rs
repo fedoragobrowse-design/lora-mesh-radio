@@ -78,6 +78,7 @@ async fn runtime_task(
     let mut usb_state0 = usb::UsbState::new(engine, health);
     usb_state0.settings = boot_settings;
     usb_state0.wifi_configured = boot_wifi.is_some();
+    usb_state0.wifi_ssid_len = boot_wifi.map(|(_, sl, _, _)| sl).unwrap_or(0);
     let mut entropy = crate::runtime::TrngEntropy::new(&mut trng);
     let mut rt = crate::runtime::Runtime::new(
         usb_state0,
@@ -197,11 +198,16 @@ async fn commit_staged(usb_state: &mut usb::UsbState) -> bool {
         };
         if ok {
             usb_state.wifi_configured = !is_forget;
+            // Keep the display length in sync: staged ssid_len on set,
+            // zero on forget or when nothing was staged.
+            usb_state.wifi_ssid_len = if is_forget {
+                0
+            } else {
+                usb_state.staged_wifi.map(|(_, sl, _, _)| sl).unwrap_or(0)
+            };
             usb_state.staged_wifi = None;
             return true;
         }
-        usb_state.staged_wifi = None;
-        return false;
     }
     true
 }
@@ -427,6 +433,11 @@ async fn main(spawner: Spawner) {
                         break;
                     }
                 }
+                // Terminate the line like radio-free `write_line`: the host
+                // frames replies on `\n`; without it every reply stalls.
+                if connected {
+                    let _ = tx.write_packet(b"\n").await;
+                }
             }
         };
         embassy_futures::join::join3(device.run(), receive, transmit).await;
@@ -437,6 +448,7 @@ async fn main(spawner: Spawner) {
             let mut usb_state = usb::UsbState::new(engine, health);
             usb_state.settings = boot_settings;
             usb_state.wifi_configured = boot_wifi.is_some();
+            usb_state.wifi_ssid_len = boot_wifi.map(|(_, sl, _, _)| sl).unwrap_or(0);
             let mut lines = usb::LineBuffer::new();
             let mut out = [0u8; usb::REPLY_LEN];
             let mut scratch = [0u8; usb::PARSE_SCRATCH_LEN];

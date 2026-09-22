@@ -1,10 +1,18 @@
 # Meshtastic compatibility — PROPOSAL ONLY (no protocol changes)
 
-Status: **proposal** (host receive-only parser landed: see §5). This
-document authorizes **no changes** to the secure mesh: no frame,
-crypto, RF, firmware, or secure-host/script changes. It adds a
-display-only decode path for public Meshtastic frames captured by a
-second radio; it adds no TX, no PSK handling, and no bridging.
+Status: **proposal** (host receive-only parser + `mesh-core` decode-only
+helpers landed: see §5). This document authorizes **no changes** to the
+secure mesh: no frame, crypto, RF, firmware dispatch, or
+secure-host/script changes. It adds a display-only decode path for
+public Meshtastic frames; it adds no TX, no PSK handling, and no bridging.
+
+Baseline (2026-09-21, from Main): A→C and B→A RF links are ACK-proven at
++2 dBm SF7/BW500/CR4-5/sync `0x12` on radio-secure image `1ba682e7`; all
+three boards live with radios on. TCP is parked (router MAC-filters new
+devices). Constraint: **any compat MUST ride the existing encrypted
+frame path, never bypass it.** Compat bytes travel INSIDE an authenticated
+LMESH secure DATA body and are handed to the decode helpers only after
+endpoint decryption. This doc does not re-prove RF and assumes TCP is down.
 
 ## 0. Decision: dual image, secure stays default
 
@@ -217,11 +225,39 @@ radio feeding raw payloads to the host parser.
   entry point is labeled INSECURE in its docstring; `format_packet`
   output carries the `INSECURE ... (shared channel; unauthenticated)`
   marker for any UI that displays it.
+- **Landed (`mesh-core`, decode-only, feature-gated):**
+  `crates/mesh-core/src/compat.rs` behind non-default cargo feature
+  `meshtastic` mirrors the host parser in `no_std` Rust: fixed-capacity
+  (512-B ceiling, borrowed slices, zero allocation), `parse_packet` /
+  `try_parse_packet` / `portnum_name` only. No encode/send/encrypt path,
+  no PSK API, no secure-module imports, no frame-path or dispatch
+  changes. Encrypted-path-only: callers MUST hand it bytes already
+  decrypted from an LMESH secure DATA body; it never sees raw RF and
+  never retunes the modem.
 - **Needs second radio (explicit non-goal):** staying on the secure
   mesh AND Meshtastic at once; any "bridge" box between the two meshes
   (would decrypt both — a designed plaintext point, NEVER implicit).
-  `compat.py` takes raw payload bytes as input; RF capture/transport
-  lives outside it and is NOT built here.
+  Both parsers take caller-supplied payload bytes as input; RF
+  capture/transport lives outside them and is NOT built here.
+
+## 5a. Staged plan (sniff/decode first, TX last, never auto-enabled)
+
+1. **Stage 0 — this ticket (landed):** host parser + `mesh-core`
+   decode-only helpers. No RF, no TX, no PSK, no dispatch changes.
+2. **Stage 1 — sniff/decode over the encrypted path (next):** a
+   Meshtastic-tuned second radio feeds captures to the host; the host
+   ferries raw captures INSIDE secure LMESH DATA to a paired node whose
+   firmware calls `compat::try_parse_packet` post-decryption for local
+   display only. Needs real RF captures to prove field coverage; the
+   current vectors are hand-built, not air-proven.
+3. **Stage 2 — display plumbing (proposal):** USB/host surfaces show
+   decoded text with the §6 INSECURE strings; drop + count oversize /
+   unknown-portnum / admin-remote packets. Still RX-only.
+4. **Stage 3 — TX (explicitly last, NOT proposed):** any Meshtastic TX
+   needs a separate threat review, region gate (`UNSET` = no TX), duty
+   caps, isolated identity store, and operator opt-in (`INSECURE-OPT-IN`).
+   Never auto-enabled; never from the secure image.
+
 - **Breaks legal or the +2 dBm hard constraint (NOT proposed):**
   raising TX for range parity; EU operation without a duty tracker;
   `override_frequency` / HAM-mode out-of-band TX; `SHORT_TURBO` 500 kHz

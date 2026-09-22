@@ -394,7 +394,7 @@ def cmd_pair_import(args: argparse.Namespace) -> int:
     # Firmware `decode_transport` requires the full `LMESH1:` transport text;
     # the bare base64 body alone is BAD_REQUEST.
     params: dict = {"record_b64": text, "replace": bool(args.replace)}
-    if args.lab_address is not None:
+    if getattr(args, "lab_address", None) is not None:
         # Firmware has no `lab_address` field on `pair_import` in this secure
         # image; reject it here instead of transmitting an ignored value.
         return _err("--lab-address is not supported by this firmware image (no contact mutation)")

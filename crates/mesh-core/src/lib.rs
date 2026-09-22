@@ -4,6 +4,8 @@
 //! security/pairing/relay/clock behaviour lands in Phases 2-4.
 
 pub mod clock;
+#[cfg(feature = "meshtastic")]
+pub mod compat;
 pub mod frame;
 pub mod pairing;
 pub mod relay;

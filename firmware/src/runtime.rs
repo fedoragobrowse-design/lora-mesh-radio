@@ -50,7 +50,7 @@ impl UsbOut {
 /// Storage owner channels (main passes the existing statics).
 pub struct StorageChannels {
     pub req: &'static Channel<CriticalSectionRawMutex, StorageReq, 2>,
-    pub resp: &'static Channel<CriticalSectionRawMutex, StorageResp, 2>,
+    pub resp: &'static Channel<CriticalSectionRawMutex, StorageResp, 4>,
 }
 
 /// TRNG word source owned by main.

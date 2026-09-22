@@ -218,6 +218,8 @@ pub struct UsbState {
     /// Whether a WiFi credential is durably stored (loaded at boot or
     /// committed this session). `wifi_status` reports this, never secrets.
     pub wifi_configured: bool,
+    /// Stored SSID length for `wifi_status` display (never the SSID itself).
+    pub wifi_ssid_len: u8,
     /// Deferred secure-send assembly with validated UTF-8 text. Stashed
     /// during dispatch; main draws TRNG words and drives begin/emit.
     pub send_text: [u8; 160],
@@ -278,6 +280,7 @@ impl UsbState {
             settings_tx_pending: false,
             staged_wifi: None,
             wifi_configured: false,
+            wifi_ssid_len: 0,
             send_text: [0u8; 160],
             send_len: 0,
             ping_count: 0,
@@ -1021,17 +1024,15 @@ fn op_settings_set(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> O
     Outcome::NeedsCommit(0)
 }
 
-/// `wifi_status`: report `{configured, ssid_len}` — never secrets. `ssid`
+/// `wifi_status`: report `{configured, ssid_len}` — never secrets. `ssid_len`
 /// is only the length (so the operator can confirm which network without
 /// dumping it); the passphrase length is never reported either.
 fn op_wifi_status(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outcome {
     let id = req.id;
     let (ssid_len, configured) = match state.staged_wifi {
         Some((_, sl, _, _)) => (sl as u64, true),
-        None => (0, state.wifi_configured),
+        None => (state.wifi_ssid_len as u64, state.wifi_configured),
     };
-    // Live length comes from staged state when a commit is pending; the
-    // stored length is not kept in RAM (only the configured flag).
     let mut w = JsonWriter::new(out);
     let n = (|| {
         w.raw(b"{\"id\":")?;
@@ -1402,12 +1403,14 @@ pub fn commit_reply(state: &mut UsbState, out: &mut [u8]) -> Option<usize> {
         }
         Some(StagedReply::WifiSet { id }) => {
             // Credential committed; report shape only, never secrets.
+            // Keep the length in RAM so later `wifi_status` reports it.
             let ssid_len = state
                 .staged_wifi
                 .map(|(_, sl, _, _)| sl as u64)
                 .unwrap_or(0);
             state.staged_wifi = None;
             state.wifi_configured = true;
+            state.wifi_ssid_len = ssid_len as u8;
             let mut w = JsonWriter::new(out);
             let n = (|| {
                 w.raw(b"{\"id\":")?;
@@ -1424,6 +1427,7 @@ pub fn commit_reply(state: &mut UsbState, out: &mut [u8]) -> Option<usize> {
         Some(StagedReply::WifiForget { id }) => {
             state.staged_wifi = None;
             state.wifi_configured = false;
+            state.wifi_ssid_len = 0;
             match reply_ok_simple(id, "{\"configured\":false}", out) {
                 Outcome::Inline(n) => Some(n),
                 _ => None,
