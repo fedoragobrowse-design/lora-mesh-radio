@@ -267,6 +267,9 @@ impl<'a, E: Entropy> Runtime<'a, E> {
                 self.usb.staged_reply,
                 Some(usb::StagedReply::WifiForget { .. })
             );
+            // Capture the length BEFORE clearing: commit_reply renders from
+            // staged state, and the publish below consumes it.
+            let staged_len = self.usb.staged_wifi.map(|(_, sl, _, _)| sl);
             if !is_forget {
                 if let Some((ssid, sl, pass, pl)) = self.usb.staged_wifi {
                     let mut c = crate::wifi::WifiCred::empty();
@@ -278,7 +281,12 @@ impl<'a, E: Entropy> Runtime<'a, E> {
                     let _ = crate::wifi::WIFI_CRED.try_send(c);
                 }
             }
-            self.usb.staged_wifi = Some(([0u8; 32], 0, [0u8; 63], 0));
+            // Keep display length in RAM; clear only the secret bytes.
+            self.usb.wifi_ssid_len = if is_forget {
+                0
+            } else {
+                staged_len.unwrap_or(self.usb.wifi_ssid_len)
+            };
             self.usb.staged_wifi = None;
         }
         true

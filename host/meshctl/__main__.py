@@ -37,6 +37,14 @@ def _firmware_error(error: str) -> int:
         return _err(f"firmware error: RADIO_UNAVAILABLE ({RADIO_UNAVAILABLE_HINT})")
     if error == "RADIO_MUST_BE_OFF":
         return _err("firmware error: RADIO_MUST_BE_OFF (run `radio off` first; pairing never transmits)")
+    if error == "SAS_MISMATCH":
+        return _err("firmware error: SAS_MISMATCH (compare the transcript aloud on BOTH sides, then re-run with --sas-match)")
+    if error == "TIME_JUMP_NEEDS_CONFIRM":
+        return _err("firmware error: TIME_JUMP_NEEDS_CONFIRM (forward jump over 1h; re-run with time set --confirm-jump)")
+    if error == "CONTACT_BLOCKED":
+        return _err("firmware error: CONTACT_BLOCKED (unblock first, or pick another contact)")
+    if error == "UNCONFIRMED":
+        return _err("firmware error: UNCONFIRMED (peer off, radio off, or out of range; check `radio on` + epoch sync)")
     return _err(f"firmware error: {error}")
 
 def _do_exchange(args: argparse.Namespace, op: str, params: dict | None) -> dict | int:
@@ -464,8 +472,15 @@ def cmd_pair_import(args: argparse.Namespace) -> int:
 
 # ---- receive loops -----------------------------------------------------------
 
-def _display_line(port: str, obj: dict) -> None:
+def _display_line(port: str, obj: dict, raw_json: bool = False) -> None:
     if not isinstance(obj, dict):
+        return
+    if obj.get("event") == "received" and not raw_json:
+        # Friendly short line; history still records the full event.
+        _note_received(port, obj)
+        contact = obj.get("contact_id")
+        text = obj.get("text", "")
+        print(f"<- [{contact}] {text}")
         return
     if obj.get("event") == "received":
         _note_received(port, obj)
@@ -476,7 +491,6 @@ def _display_line(port: str, obj: dict) -> None:
     elif "ok" in obj:
         # Late/stray reply to no outstanding request: log, never drop.
         print(f"meshctl: late reply: {json.dumps(obj, ensure_ascii=False)}", file=sys.stderr)
-
 
 def cmd_listen(args: argparse.Namespace) -> int:
     from .transports import open_session
@@ -504,7 +518,7 @@ def cmd_listen(args: argparse.Namespace) -> int:
                 print(f"meshctl: note: {exc}", file=sys.stderr)
                 continue
             if obj is not None:
-                _display_line(args.port, obj)
+                _display_line(args.port, obj, raw_json=getattr(args, "json", False))
     except KeyboardInterrupt:
         pass
     finally:
@@ -684,13 +698,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_ping = sub.add_parser("ping", help="liveness probe (count 1-3)")
     p_ping.add_argument("--ping-timeout", dest="timeout", type=float, default=30.0, help="reply deadline in seconds")
 
-    p_send = sub.add_parser("send", help="send a text message")
-    p_send.add_argument("--contact", required=True, help="paired contact name (any operator label set at pair import)")
+    p_send = sub.add_parser("send", help="send a text message", aliases=["msg", "say"])
+    p_send.add_argument("--contact", "--to", dest="contact", required=True, help="paired contact name (any operator label set at pair import)")
     p_send.add_argument("--text", required=True, help="message text (1-160 UTF-8 bytes)")
     p_send.add_argument("--send-timeout", dest="timeout", type=float, default=serial_link.SEND_TIMEOUT, help="outcome deadline in seconds (covers bounded retries)")
 
-    p_listen = sub.add_parser("listen", help="receive loop (single owner; second opener gets PORT_BUSY)")
+    p_listen = sub.add_parser("listen", help="receive loop (single owner; second opener gets PORT_BUSY)", aliases=["rx"])
     p_listen.add_argument("--seconds", type=float, default=None, help="stop after N seconds (default: until Ctrl-C)")
+    p_listen.add_argument("--json", action="store_true", help="print raw event JSON lines (default: friendly short lines)")
 
     p_chat = sub.add_parser("chat", help="interactive chat (single owner)")
     p_chat.add_argument("--contact", default=None, help="initial send target")
@@ -762,9 +777,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_radio(args)
     if args.cmd == "ping":
         return cmd_ping(args)
-    if args.cmd == "send":
+    if args.cmd in ("send", "msg", "say"):
         return cmd_send(args)
-    if args.cmd == "listen":
+    if args.cmd in ("listen", "rx"):
         return cmd_listen(args)
     if args.cmd == "chat":
         return cmd_chat(args)

@@ -1474,11 +1474,12 @@ pub fn commit_reply(state: &mut UsbState, out: &mut [u8]) -> Option<usize> {
         }
         Some(StagedReply::WifiSet { id }) => {
             // Credential committed; report shape only, never secrets.
-            // Keep the length in RAM so later `wifi_status` reports it.
+            // commit_wifi already banked the length in RAM (staged state
+            // is cleared by then); fall back to it instead of 0.
             let ssid_len = state
                 .staged_wifi
                 .map(|(_, sl, _, _)| sl as u64)
-                .unwrap_or(0);
+                .unwrap_or(state.wifi_ssid_len as u64);
             state.staged_wifi = None;
             state.wifi_configured = true;
             state.wifi_ssid_len = ssid_len as u8;
