@@ -256,6 +256,10 @@ class SerialSession:
             obj = self.read_next(remaining)
             if obj is None:
                 continue
+            # L1: firmware parse failures reply with id 0 (no matching
+            # exchange); surface them immediately instead of hanging.
+            if type(obj.get("id")) is int and obj["id"] == 0 and type(obj.get("ok")) is bool and not obj["ok"]:
+                return obj, events
             if "event" not in obj and type(obj.get("id")) is int and obj["id"] == cmd_id:
                 if type(obj.get("ok")) is bool:
                     return obj, events
