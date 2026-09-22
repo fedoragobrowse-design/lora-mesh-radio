@@ -231,8 +231,17 @@
       $('btn-copy-cmd').textContent = 'Copy failed — select the text manually';
     }
   });
+  $('btn-copy-wifi').addEventListener('click', async () => {
+    const cmd = $('wifi-cmd').textContent.trim();
+    try {
+      await navigator.clipboard.writeText(cmd);
+      $('btn-copy-wifi').textContent = 'Copied';
+      setTimeout(() => { $('btn-copy-wifi').textContent = 'Copy commands'; }, 1500);
+    } catch (e) {
+      $('btn-copy-wifi').textContent = 'Copy failed — select the text manually';
+    }
+  });
 
-  releaseSel.addEventListener('change', renderRelease);
 
   loadManifest().catch((e) => {
     releaseInfo.textContent = 'Could not load releases.json: ' + e.message +

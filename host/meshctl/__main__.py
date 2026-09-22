@@ -44,15 +44,28 @@ def _do_exchange(args: argparse.Namespace, op: str, params: dict | None) -> dict
     from .transports import open_session
     label = args.port if getattr(args, "transport", "usb") == "usb" else f"{args.tcp_host}:{args.tcp_port}"
     try:
-        with open_session(
+        session = open_session(
             getattr(args, "transport", "usb"),
             device=args.port or "",
             host=getattr(args, "tcp_host", "127.0.0.1"),
             tcp_port=getattr(args, "tcp_port", 7777),
-        ) as session:
-            reply, events = session.exchange(op, params, args.timeout)
+        )
     except serial_link.PortBusyError:
         return _err(f"PORT_BUSY: {label} is owned by another process (one owner per port)")
+    try:
+        reply, events = session.exchange(op, params, args.timeout)
+    except serial_link.TimeoutError as exc:
+        return _err(f"timeout waiting for reply: {exc}")
+    except (ValueError, RuntimeError, OSError) as exc:
+        return _err(str(exc))
+    finally:
+        session.close()
+    for evt in events:
+        if isinstance(evt, dict) and evt.get("event") == "received":
+            _note_received(label if getattr(args, "transport", "usb") == "tcp" else args.port, evt)
+    if not reply.get("ok"):
+        return _firmware_error(str(reply.get("error", "UNKNOWN")))
+    return reply
 
 def _note_received(port: str, evt: dict) -> None:
     """Show an interleaved ``received`` event and keep it in history."""
@@ -241,22 +254,25 @@ def cmd_send(args: argparse.Namespace) -> int:
         return _err(describe)
     params = dict(params)
     params["text"] = args.text
+    from .transports import open_session
+    label = args.port if getattr(args, "transport", "usb") == "usb" else f"{args.tcp_host}:{args.tcp_port}"
     try:
-        from .transports import open_session
-        with open_session(
+        session = open_session(
             getattr(args, "transport", "usb"),
             device=args.port or "",
             host=getattr(args, "tcp_host", "127.0.0.1"),
             tcp_port=getattr(args, "tcp_port", 7777),
-        ) as session:
-            reply, events = session.exchange("send", params, args.timeout)
+        )
     except serial_link.PortBusyError:
-        label = args.port if getattr(args, "transport", "usb") == "usb" else f"{args.tcp_host}:{args.tcp_port}"
         return _err(f"PORT_BUSY: {label} is owned by another process (one owner per port)")
+    try:
+        reply, events = session.exchange("send", params, args.timeout)
     except serial_link.TimeoutError as exc:
         return _err(f"timeout waiting for send outcome (bounded retries may still be on air): {exc}")
     except (ValueError, RuntimeError, OSError) as exc:
         return _err(str(exc))
+    finally:
+        session.close()
     for evt in events:
         if isinstance(evt, dict) and evt.get("event") == "received":
             _note_received(args.port, evt)
@@ -428,7 +444,7 @@ def cmd_listen(args: argparse.Namespace) -> int:
             device=args.port or "",
             host=getattr(args, "tcp_host", "127.0.0.1"),
             tcp_port=getattr(args, "tcp_port", 7777),
-        ).open()
+        )
     except serial_link.PortBusyError:
         return _err(f"PORT_BUSY: {label} is owned by another process (one owner per port)")
     except (RuntimeError, OSError) as exc:
@@ -473,7 +489,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             device=args.port or "",
             host=getattr(args, "tcp_host", "127.0.0.1"),
             tcp_port=getattr(args, "tcp_port", 7777),
-        ).open()
+        )
     except serial_link.PortBusyError:
         return _err(f"PORT_BUSY: {label} is owned by another process (one owner per port)")
     ser_lock = threading.Lock()

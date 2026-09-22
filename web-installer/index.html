@@ -66,10 +66,16 @@
 </section>
 
 <section id="step4" class="card">
-  <h2>4 · Verify with <code>meshctl status</code></h2>
-  <p>After the board reboots as a CDC node, probe it from a terminal
+  <h2>4 · Set up <code>meshctl</code> + verify</h2>
+  <p>One-time host setup (creates the venv, installs <code>meshctl</code>):</p>
+  <pre>git clone &lt;repo-url&gt; LoRa_Mesh_Handoff
+cd LoRa_Mesh_Handoff
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ./host</pre>
+  <p>Then download the guided post-flash script and run it
   (replace <code>/dev/ttyACM0</code> with your port):</p>
-  <pre id="verify-cmd">python3 -m meshctl --port /dev/ttyACM0 status</pre>
+  <pre><a href="scripts/mesh-setup.sh" download>scripts/mesh-setup.sh</a></pre>
+  <pre id="verify-cmd">bash scripts/mesh-setup.sh /dev/ttyACM0 --label A</pre>
   <button id="btn-copy-cmd" type="button">Copy command</button>
   <p>Expect JSON containing (values vary per board):</p>
   <pre>{
@@ -84,6 +90,31 @@
   this status output — never by <code>ttyACM</code> number.</p>
 </section>
 
+<section id="step5" class="card">
+  <h2>5 · WiFi for the TCP transport (after first flash)</h2>
+  <p>The radio-secure image serves the same newline-JSON wire on TCP 7777
+  once it joins your network. The passphrase never appears in output or
+  logs, and the board joins live with no reboot:</p>
+.venv/bin/python -m meshctl --port /dev/ttyACM0 wifi status</pre>
+  <button id="btn-copy-wifi" type="button">Copy commands</button>
+  <p>Then talk over WiFi instead of USB:</p>
+  <pre>.venv/bin/python -m meshctl --transport tcp --tcp-host 192.168.1.10 status</pre>
+  <p class="hint">Find the board's IP from your router/DHCP list. `wifi forget`
+  clears the stored credential. Secrets stay in board flash; this page never
+  sees them.</p>
+</section>
+
+<section id="step6" class="card">
+  <h2>6 · Updates (OTA note)</h2>
+  <p>There is <strong>no over-the-air firmware update</strong> in this
+  release: updates ship as signed UF2 images flashed over USB BOOTSEL
+  exactly like the first install (pick the new release above, copy, verify
+  with <code>meshctl status</code>). The WiFi TCP transport carries only the
+  newline-JSON CLI wire — it cannot replace firmware. A future OTA path
+  would need image signatures + rollback + a second flash bank, none of
+  which exist on this layout; do not treat the TCP port as a firmware
+  channel.</p>
+</section>
 <section id="limits" class="card">
   <h2>RP2350 UF2 limits</h2>
   <ul>
