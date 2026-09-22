@@ -206,6 +206,8 @@ impl<'a, E: Entropy> Runtime<'a, E> {
         let ok = loop {
             match self.storage.resp.receive().await {
                 StorageResp::Committed(r) => break r.is_ok(),
+                // L9: a mid-run storage Fault must fail closed, never hang.
+                StorageResp::Fault => break false,
                 _ => continue,
             }
         };
@@ -247,6 +249,8 @@ impl<'a, E: Entropy> Runtime<'a, E> {
         let ok = loop {
             match self.storage.resp.receive().await {
                 StorageResp::Committed(r) => break r.is_ok(),
+                // L9: a mid-run storage Fault must fail closed, never hang.
+                StorageResp::Fault => break false,
                 _ => continue,
             }
         };
@@ -485,6 +489,20 @@ impl<'a, E: Entropy> Runtime<'a, E> {
                     self.reply(&owned[..len]);
                 }
             }
+            // Reboot is driven by main's USB loop (needs the class handle
+            // for TX flush + the ROM call); the runtime only parks it.
+            usb::Outcome::NeedsRebootBootsel => {
+                // Re-park so main's USB loop can observe it after the reply
+                // flushes through USB_TX below.
+                self.usb.pending_op = Some(usb::PendingOp::RebootBootsel {
+                    id: self.usb.reply_id,
+                });
+                if let Some(len) = usb::reply_rebooting(&mut self.usb, &mut self.scratch) {
+                    let mut owned = [0u8; REPLY_LEN];
+                    owned[..len].copy_from_slice(&self.scratch[..len]);
+                    self.reply(&owned[..len]);
+                }
+            }
             _ => {}
         }
     }
@@ -530,6 +548,12 @@ impl<'a, E: Entropy> Runtime<'a, E> {
             Some(PendingOp::SendPrep { id, contact_id }) => (id, contact_id),
             _ => return usb::Outcome::Silent,
         };
+        // M2: fail fast when the radio is off — never burn a seq
+        // reservation + flash commit for a TX the policy gate will cancel.
+        if !self.usb.engine.radio_on() {
+            self.usb.send_len = 0;
+            return self.render_err(id, usb::err::RADIO_UNAVAILABLE);
+        }
         if self.send.is_some() {
             self.usb.send_len = 0;
             return self.render_err(id, usb::err::BUSY);
@@ -1056,6 +1080,10 @@ impl<'a, E: Entropy> Runtime<'a, E> {
         if !self.commit().await {
             self.emit_err(self.usb.reply_id, usb::err::STORAGE_FAULT);
             return;
+        }
+        // M4: radio (re-)enable latches RF tunables; clear the pending flag.
+        if enabled {
+            self.usb.settings_tx_pending = false;
         }
         self.sync_policy();
         // No radio task drains commands when hardware is absent: skip the

@@ -215,7 +215,10 @@ def cmd_time(args: argparse.Namespace) -> int:
     secs = _parse_utc(args.utc)
     if secs is None or secs < 0:
         return _err("--utc must be 'now', unix seconds, or ISO-8601")
-    reply = _do_exchange(args, "time_set", {"unix_seconds": secs})
+    params: dict = {"unix_seconds": secs}
+    if getattr(args, "confirm_jump", False):
+        params["confirm"] = True
+    reply = _do_exchange(args, "time_set", params)
     if isinstance(reply, int):
         return reply
     _print_result(reply)
@@ -320,7 +323,15 @@ def cmd_delete(args: argparse.Namespace) -> int:
     if isinstance(reply, int):
         return reply
     contacts.drop_contact(serial, args.contact, cid)
-    print(f"deleted {describe} (slot freed locally and on board)")
+    # D3: scrub host message rows for the deleted contact (VACUUM reclaims).
+    try:
+        conn = history.open_history(_local.history_path_for(args.port))
+        with conn:
+            n = history.forget_contact(conn, args.contact)
+        conn.close()
+        print(f"deleted {describe} (slot freed locally and on board; {n} local message rows scrubbed)")
+    except OSError as exc:
+        print(f"deleted {describe} (slot freed locally and on board; history scrub failed: {exc})")
     return 0
 
 
@@ -394,6 +405,9 @@ def cmd_pair_import(args: argparse.Namespace) -> int:
     # Firmware `decode_transport` requires the full `LMESH1:` transport text;
     # the bare base64 body alone is BAD_REQUEST.
     params: dict = {"record_b64": text, "replace": bool(args.replace)}
+    # C4: firmware enforces SAS on confirmation records; pass the flag.
+    if getattr(args, "sas_match", False):
+        params["sas_match"] = True
     if getattr(args, "lab_address", None) is not None:
         # Firmware has no `lab_address` field on `pair_import` in this secure
         # image; reject it here instead of transmitting an ignored value.
@@ -405,6 +419,12 @@ def cmd_pair_import(args: argparse.Namespace) -> int:
     progress = result.get("progress", result.get("stage", result.get("status", "")))
     fingerprint = result.get("fingerprint", result.get("transcript", result.get("transcript_fingerprint", "")))
     contact_id = result.get("contact_id")
+    # C4: transcript/SAS binding. On proof/confirmation import the
+    # fingerprint is the MITM tripwire: activation requires --sas-match
+    # (operator compared aloud on both sides). Offer import is unaffected.
+    if kind in ("proof", "confirmation") and isinstance(contact_id, int) and not getattr(args, "sas_match", False):
+        print(f"imported {kind}: progress={progress} fingerprint={fingerprint}".rstrip())
+        return _err("SAS gate: compare the transcript aloud on BOTH sides, then re-run with --sas-match (no contact mutation)")
     print(f"imported {kind}: progress={progress} fingerprint={fingerprint}".rstrip())
     if isinstance(contact_id, bool) or not isinstance(contact_id, int):
         print("no activation yet (further records needed); mappings unchanged")
@@ -635,6 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     t_sub = p_time.add_subparsers(dest="time_cmd", required=True)
     p_set = t_sub.add_parser("set", help="set clock from host UTC")
     p_set.add_argument("--utc", default="now", help="'now', unix seconds, or ISO-8601 (default now)")
+    p_set.add_argument("--confirm-jump", action="store_true", help="allow forward jumps over one hour (B4 ceiling bypass, operator-confirmed)")
     t_sub.add_parser("status", help="clock status")
 
     p_radio = sub.add_parser("radio", help="radio control")
@@ -687,6 +708,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--file", required=True, help="peer PNG path")
     p_imp.add_argument("--name", required=True, help="local display name for the contact (any label, e.g. alice, relay-2)")
     p_imp.add_argument("--replace", action="store_true", help="replace an existing contact slot")
+    p_imp.add_argument("--sas-match", action="store_true", help="confirm the transcript/SAS was compared aloud on both sides (required to activate proof/confirmation imports)")
     cli_extra.register(sub)
     return parser
 

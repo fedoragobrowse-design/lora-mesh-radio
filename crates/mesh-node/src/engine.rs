@@ -58,8 +58,11 @@ pub enum EngineError {
     PairingAbsent,
     PairingExpired,
     NoSlot,
+    /// Confirmation import without the aloud SAS comparison.
+    SasMismatch,
+    /// Forward time jump over one hour without operator confirmation.
+    TimeJumpNeedsConfirm,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairStep {
     NeedProof,
@@ -440,6 +443,17 @@ impl Engine {
     /// below the persisted transmit epoch or any receive anchor fails with
     /// TIME_ROLLBACK. Commits before returning.
     pub fn set_time(&mut self, unix_seconds: u64) -> Result<u32, EngineError> {
+        self.set_time_confirmed(unix_seconds, false)
+    }
+
+    /// B4: like `set_time` but `confirmed=true` permits forward jumps over
+    /// one hour (operator-confirmed via `--confirm-jump`). Gradual slew
+    /// stays accepted without confirmation.
+    pub fn set_time_confirmed(
+        &mut self,
+        unix_seconds: u64,
+        confirmed: bool,
+    ) -> Result<u32, EngineError> {
         if self.fault {
             return Err(EngineError::StorageFault);
         }
@@ -453,6 +467,15 @@ impl Engine {
         }
         if new_epoch < floor {
             return Err(EngineError::TimeRollback);
+        }
+        // B4/X1: ceiling against jumps. A single step forward of more than
+        // one hour past the current epoch needs operator confirmation
+        // (host re-issues with confirm); gradual slew stays accepted.
+        if !confirmed && self.time_valid {
+            let cur = self.epoch();
+            if new_epoch > cur.saturating_add(1) {
+                return Err(EngineError::TimeJumpNeedsConfirm);
+            }
         }
         // Atomically advance every present contact's anchor + windows.
         for c in self.contacts.iter_mut() {
@@ -629,6 +652,18 @@ impl Engine {
         record: &[u8],
         replace: bool,
     ) -> Result<PairImportOutcome, EngineError> {
+        self.pair_import_sas(record, replace, false)
+    }
+
+    /// SAS-gated import: confirmation records (which activate trust)
+    /// require `sas_match` (operator compared the transcript aloud on both
+    /// sides). Offer/proof imports are unaffected.
+    pub fn pair_import_sas(
+        &mut self,
+        record: &[u8],
+        replace: bool,
+        sas_match: bool,
+    ) -> Result<PairImportOutcome, EngineError> {
         self.check_usable()?;
         self.require_radio_off()?;
         let p = self.pending.as_mut().ok_or(EngineError::PairingAbsent)?;
@@ -637,6 +672,11 @@ impl Engine {
         }
         if record.is_empty() {
             return Err(EngineError::BadRequest);
+        }
+        // C4: trust activates on confirmation import; require the aloud
+        // SAS comparison BEFORE flash mutation, not after.
+        if record[0] == pairing::RECORD_CONFIRM && !sas_match {
+            return Err(EngineError::SasMismatch);
         }
         match record[0] {
             pairing::RECORD_OFFER => self.import_offer(record, replace),

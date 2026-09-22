@@ -58,11 +58,14 @@ pub struct KeyMeta {
 /// (`0x12`) as a readonly entry so hosts can display the full RF picture
 /// without implying it is tunable.
 pub const KEYS: [KeyMeta; 7] = [
+    // M3: RF policy cap. Firmware always transmits at +2 dBm
+    // (SX1276 PA_BOOST minimum); the stored value is display-only so the
+    // surface cannot promise power the radio never produces.
     KeyMeta {
         key: "tx_power",
-        min: 0,
-        max: 20,
-        readonly: false,
+        min: 2,
+        max: 2,
+        readonly: true,
         rf: true,
     },
     KeyMeta {
@@ -172,7 +175,8 @@ impl Settings {
     /// push the runtime out of band.
     pub fn clamp_all(&mut self) -> bool {
         let mut changed = false;
-        let (v, c) = clamp_u32(self.tx_power_dbm as u32, 0, 20);
+        // M3: matches the readonly KEYS cap; older records clamp down to 2.
+        let (v, c) = clamp_u32(self.tx_power_dbm as u32, 2, 2);
         self.tx_power_dbm = v as u8;
         changed |= c;
         let (v, c) = clamp_u32(self.max_tx as u32, 1, 10);

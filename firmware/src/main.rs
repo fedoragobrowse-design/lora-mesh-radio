@@ -102,6 +102,16 @@ async fn runtime_task(
                 }
             }
         }
+        // BOOTSEL reboot: reply already flushed via USB_TX; wait for the
+        // transmit task to drain it, then invoke the ROM (never returns).
+        if matches!(
+            rt.usb.pending_op,
+            Some(usb::PendingOp::RebootBootsel { .. })
+        ) {
+            rt.usb.pending_op = None;
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(300)).await;
+            embassy_rp::rom_data::reset_to_usb_boot(0, 0);
+        }
         while let Ok(evt) = crate::radio::RADIO_EVT.try_receive() {
             rt.on_radio_evt(evt).await;
         }
@@ -126,6 +136,8 @@ async fn commit_staged(usb_state: &mut usb::UsbState) -> bool {
         let ok = loop {
             match STORAGE_RESP.receive().await {
                 StorageResp::Committed(r) => break r.is_ok(),
+                // L9: a mid-run storage Fault must fail closed, never hang.
+                StorageResp::Fault => break false,
                 _ => continue,
             }
         };
@@ -150,6 +162,8 @@ async fn commit_staged(usb_state: &mut usb::UsbState) -> bool {
         let ok = loop {
             match STORAGE_RESP.receive().await {
                 StorageResp::Committed(r) => break r.is_ok(),
+                // L9: a mid-run storage Fault must fail closed, never hang.
+                StorageResp::Fault => break false,
                 _ => continue,
             }
         };
@@ -193,6 +207,8 @@ async fn commit_staged(usb_state: &mut usb::UsbState) -> bool {
         let ok = loop {
             match STORAGE_RESP.receive().await {
                 StorageResp::Committed(r) => break r.is_ok(),
+                // L9: a mid-run storage Fault must fail closed, never hang.
+                StorageResp::Fault => break false,
                 _ => continue,
             }
         };
@@ -208,6 +224,10 @@ async fn commit_staged(usb_state: &mut usb::UsbState) -> bool {
             usb_state.staged_wifi = None;
             return true;
         }
+        // H2: commit failure must fail closed, never report success.
+        usb_state.staged_wifi = None;
+        usb_state.staged_reply = None;
+        return false;
     }
     true
 }
@@ -516,6 +536,9 @@ async fn main(spawner: Spawner) {
                             | Some(usb::PendingOp::PingPrep { .. }) => {
                                 usb::reply_unexpected_prep(&mut usb_state, &mut out)
                             }
+                            Some(usb::PendingOp::RebootBootsel { .. }) => {
+                                usb::Outcome::NeedsRebootBootsel
+                            }
                             None => usb::Outcome::Silent,
                         };
                     }
@@ -525,10 +548,21 @@ async fn main(spawner: Spawner) {
                     let len = match outcome {
                         usb::Outcome::Inline(n) => Some(n),
                         usb::Outcome::NeedsCommit(_) => usb::commit_reply(&mut usb_state, &mut out),
+                        usb::Outcome::NeedsRebootBootsel => {
+                            usb::reply_rebooting(&mut usb_state, &mut out)
+                        }
                         _ => None,
                     };
                     if let Some(len) = len {
                         let _ = write_line(&mut class, &out[..len]).await;
+                    }
+                    if matches!(
+                        usb_state.pending_op,
+                        Some(usb::PendingOp::RebootBootsel { .. })
+                    ) {
+                        usb_state.pending_op = None;
+                        embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+                        embassy_rp::rom_data::reset_to_usb_boot(0, 0);
                     }
                 }
             }

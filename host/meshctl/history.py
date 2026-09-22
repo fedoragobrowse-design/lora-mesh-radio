@@ -87,6 +87,19 @@ def record_message(
     return int(cur.lastrowid)
 
 
+def forget_contact(conn: sqlite3.Connection, contact: str) -> int:
+    """Delete all rows for one contact (D3: contact_delete scrubs host
+    history, not just the firmware slot + local mapping). Returns rows."""
+    cur = conn.execute("DELETE FROM messages WHERE contact = ?", (contact,))
+    conn.commit()
+    try:
+        conn.execute("VACUUM")
+        conn.commit()
+    except Exception:
+        pass
+    return int(cur.rowcount)
+
+
 def recent_messages(conn: sqlite3.Connection, limit: int = 20) -> list[tuple]:
     """Newest-first ``(contact, direction, epoch, sequence, text)`` rows."""
     try:

@@ -65,6 +65,7 @@ pub mod err {
     pub const CONTACT_BLOCKED: &str = "CONTACT_BLOCKED";
     pub const TIME_UNSET: &str = "TIME_UNSET";
     pub const TIME_ROLLBACK: &str = "TIME_ROLLBACK";
+    pub const TIME_JUMP_NEEDS_CONFIRM: &str = "TIME_JUMP_NEEDS_CONFIRM";
     pub const STORAGE_FAULT: &str = "STORAGE_FAULT";
     pub const RADIO_MUST_BE_OFF: &str = "RADIO_MUST_BE_OFF";
     pub const RADIO_UNAVAILABLE: &str = "RADIO_UNAVAILABLE";
@@ -73,6 +74,7 @@ pub mod err {
     pub const UNPROVISIONED: &str = "UNPROVISIONED";
     pub const LINE_TOO_LONG: &str = "LINE_TOO_LONG";
     pub const ALREADY_PROVISIONED: &str = "ALREADY_PROVISIONED";
+    pub const SAS_MISMATCH: &str = "SAS_MISMATCH";
 }
 
 /// Bounded USB channels; full surfaces `BUSY`, never blocks.
@@ -148,6 +150,9 @@ pub enum Outcome {
     NeedsSendPrep,
     /// Caller must draw one TRNG word and drive the staged CAD-only ping.
     NeedsPingPrep,
+    /// Caller must flush USB TX, reply `{rebooting:true}`, then invoke the
+    /// RP235x ROM `reset_to_usb_boot` (never returns).
+    NeedsRebootBootsel,
     Silent,
 }
 
@@ -187,6 +192,13 @@ struct Request<'a> {
     /// WiFi passphrase (`wifi_set` required; 0-63 UTF-8 bytes, never logged).
     #[serde(borrow, default)]
     pass: Option<EStr<'a>>,
+    /// Reboot confirmation (`reboot_bootsel` required true; guards pocket-dial).
+    #[serde(default)]
+    confirm: Option<bool>,
+    /// SAS comparison confirmation (`pair_import` confirmation records
+    /// require true; operator compared the transcript aloud on both sides).
+    #[serde(default)]
+    sas_match: Option<bool>,
 }
 /// Mutable USB-side state: the secure engine plus volatile counters and a
 /// TRNG-backed packet-ID allocator.
@@ -534,6 +546,9 @@ fn engine_err(e: EngineError) -> &'static str {
         EngineError::StorageFault => err::STORAGE_FAULT,
         EngineError::TimeUnset => err::TIME_UNSET,
         EngineError::TimeRollback => err::TIME_ROLLBACK,
+        // B4: jumps need a second confirmed step with a distinct code so
+        // hosts prompt instead of misdiagnosing rollback.
+        EngineError::TimeJumpNeedsConfirm => err::TIME_JUMP_NEEDS_CONFIRM,
         EngineError::Busy => err::BUSY,
         EngineError::ContactBlocked => err::CONTACT_BLOCKED,
         EngineError::RadioMustBeOff => err::RADIO_MUST_BE_OFF,
@@ -542,6 +557,7 @@ fn engine_err(e: EngineError) -> &'static str {
         EngineError::PairingAbsent => err::BAD_REQUEST,
         EngineError::PairingExpired => err::BAD_REQUEST,
         EngineError::NoSlot => err::BAD_REQUEST,
+        EngineError::SasMismatch => err::SAS_MISMATCH,
     }
 }
 
@@ -604,6 +620,7 @@ fn dispatch(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outcome 
         "wifi_status" => op_wifi_status(state, req, out),
         "wifi_set" => op_wifi_set(state, req, out),
         "wifi_forget" => op_wifi_forget(state, req, out),
+        "reboot_bootsel" => op_reboot_bootsel(state, req, out),
         _ => reply_err(req.id, err::UNKNOWN_OP, out),
     }
 }
@@ -762,10 +779,25 @@ fn reply_ok_simple(id: u64, body: &str, out: &mut [u8]) -> Outcome {
 /// `complete_*` helper, awaits the storage commit, then emits the reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingOp {
-    Provision { id: u64, label: u8 },
-    PairOffer { id: u64 },
-    SendPrep { id: u64, contact_id: u8 },
-    PingPrep { id: u64, count: u8 },
+    Provision {
+        id: u64,
+        label: u8,
+    },
+    PairOffer {
+        id: u64,
+    },
+    SendPrep {
+        id: u64,
+        contact_id: u8,
+    },
+    PingPrep {
+        id: u64,
+        count: u8,
+    },
+    /// Confirmed BOOTSEL reboot awaiting TX flush + ROM call.
+    RebootBootsel {
+        id: u64,
+    },
 }
 
 fn op_provision(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outcome {
@@ -830,7 +862,9 @@ fn op_time_set(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outco
         Some(v) => v,
         None => return reply_err(req.id, err::BAD_REQUEST, out),
     };
-    match state.engine.set_time(secs) {
+    // B4: forward jumps over one hour need explicit confirmation.
+    let confirmed = req.confirm == Some(true);
+    match state.engine.set_time_confirmed(secs, confirmed) {
         Ok(_) => {
             stage_for_commit(state);
             state.staged_reply = Some(StagedReply::Status { id: req.id });
@@ -1081,17 +1115,44 @@ fn op_wifi_set(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outco
     if core::str::from_utf8(&ssid[..sn]).is_err() || core::str::from_utf8(&pass[..pn]).is_err() {
         return reply_err(id, err::BAD_REQUEST, out);
     }
+    // Scrub scratch buffers holding secrets before any further use; stage
+    // only the validated prefix (never stale tail bytes beyond sn/pn).
     let mut sb = [0u8; 32];
-    let mut pb = [0u8; 63];
     sb[..sn].copy_from_slice(&ssid[..sn]);
+    let mut pb = [0u8; 63];
     pb[..pn].copy_from_slice(&pass[..pn]);
-    // Scrub scratch buffers holding secrets before any further use.
     ssid.fill(0);
     pass.fill(0);
     state.staged_wifi = Some((sb, sn as u8, pb, pn as u8));
     state.staged_reply = Some(StagedReply::WifiSet { id });
     let _ = out;
     Outcome::NeedsCommit(0)
+}
+
+/// `reboot_bootsel`: confirm-gated reboot into the BOOTSEL mass-storage
+/// volume via the RP235x ROM (`reset_to_usb_boot`). No state mutation,
+/// works with radio on or off. The reply transmits before the ROM call;
+/// callers must flush USB TX (~100ms) before invoking.
+fn op_reboot_bootsel(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outcome {
+    if req.confirm != Some(true) {
+        return reply_err(req.id, err::BAD_REQUEST, out);
+    }
+    state.pending_op = Some(PendingOp::RebootBootsel { id: req.id });
+    let _ = out;
+    Outcome::NeedsRebootBootsel
+}
+
+/// Render the `{rebooting:true}` reply for a parked BOOTSEL reboot; the
+/// caller flushes USB TX then invokes the ROM.
+pub fn reply_rebooting(state: &mut UsbState, out: &mut [u8]) -> Option<usize> {
+    let id = match state.pending_op {
+        Some(PendingOp::RebootBootsel { id }) => id,
+        _ => return None,
+    };
+    match reply_ok_simple(id, "{\"rebooting\":true}", out) {
+        Outcome::Inline(n) => Some(n),
+        _ => None,
+    }
 }
 
 /// `wifi_forget`: clear the stored credential (commit zeroed record under
@@ -1123,6 +1184,12 @@ fn op_send(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Outcome {
     };
     if core::str::from_utf8(&text[..n]).is_err() {
         return reply_err(req.id, err::BAD_REQUEST, out);
+    }
+    // M2: radio-off send must not reserve seq or commit flash; checked
+    // after shape validation so BAD_REQUEST keeps precedence.
+    #[cfg(feature = "radio")]
+    if !state.engine.radio_on() {
+        return reply_err(req.id, err::RADIO_UNAVAILABLE, out);
     }
     if state.stash_send(cid, &text[..n]).is_err() {
         return reply_err(req.id, err::BAD_REQUEST, out);
@@ -1230,7 +1297,11 @@ fn op_pair_import(state: &mut UsbState, req: &Request<'_>, out: &mut [u8]) -> Ou
         Ok(n) => n,
         Err(_) => return reply_err(req.id, err::BAD_REQUEST, out),
     };
-    match state.engine.pair_import(&bin[..rec_len], replace) {
+    let sas_match = req.sas_match == Some(true);
+    match state
+        .engine
+        .pair_import_sas(&bin[..rec_len], replace, sas_match)
+    {
         Ok(o) => {
             stage_for_commit(state);
             let mut w = JsonWriter::new(out);
