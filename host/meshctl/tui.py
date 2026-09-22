@@ -162,7 +162,7 @@ class Tui:
                 if board is not None:
                     try:
                         name = _contacts.name_for_id(board.serial, event.contact_id)
-                    except (ValueError, OSError):
+                    except (ValueError, OSError, RuntimeError):
                         name = None
                 who = name or f"id{event.contact_id}"
                 self.room_msg(event.board, who, f"[{tag} ← {who}] {event.text}", "moss")
@@ -175,7 +175,7 @@ class Tui:
                                                     text=event.text)
                         finally:
                             conn.close()
-                    except (ValueError, TypeError, OSError):
+                    except (ValueError, TypeError, OSError, RuntimeError):
                         pass
             elif event.kind == "reply":
                 obj = self._parse_reply(event.text)
@@ -286,7 +286,7 @@ class Tui:
                                         epoch=0, sequence=0, text=text)
             finally:
                 conn.close()
-        except (ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError, RuntimeError):
             pass
 
     def send_all(self, text: str) -> None:
@@ -321,7 +321,7 @@ class Tui:
                                             epoch=0, sequence=0, text=text)
                 finally:
                     conn.close()
-            except (ValueError, TypeError, OSError):
+            except (ValueError, TypeError, OSError, RuntimeError):
                 pass
 
     def find_history(self, needle: str) -> None:
@@ -352,7 +352,7 @@ class Tui:
                             hits.append(("paper", f"[{tag} {arrow} {contact}] {text}"))
                 finally:
                     conn.close()
-            except (ValueError, TypeError, OSError):
+            except (ValueError, TypeError, OSError, RuntimeError):
                 pass
         if not hits:
             self.say(f"no match for '{needle}'", "dim")
@@ -617,6 +617,7 @@ def _run(stdscr: object, known: dict) -> int:
 
 def cmd_tui(args: argparse.Namespace) -> int:
     """Entry: scan boards, enter curses, own ports until quit."""
+    _history.DISABLED = bool(getattr(args, "no_history", False))
     known = _scan()
     if not known:
         print("meshctl: no boards found (check USB)", flush=True)

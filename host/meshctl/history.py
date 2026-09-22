@@ -24,11 +24,16 @@ CREATE TABLE IF NOT EXISTS messages (
 
 HISTORY_VERSION = 1
 
+# Process-wide opt-out (`meshctl --no-history`). Central gate so every
+# writer (CLI, app, TUI, serial_link) respects it; no caller checks needed.
+DISABLED = False
 
 
 def open_history(path: str | Path) -> sqlite3.Connection:
-    """Open (creating) a user-only history database at ``path``."""
-    path = Path(path)
+    """Open (creating) a user-only history database at ``path``.
+    Raises ``RuntimeError`` when ``DISABLED`` so opt-out leaves no artifact."""
+    if DISABLED:
+        raise RuntimeError("history disabled (--no-history)")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -64,7 +69,10 @@ def record_message(
     sequence: int,
     text: str,
 ) -> int:
-    """Insert one row; returns its row id. Raises on bad fields."""
+    """Insert one row; returns its row id. Raises on bad fields.
+    No-op (returns -1) when ``DISABLED`` (`--no-history`)."""
+    if DISABLED:
+        return -1
     if direction not in ("in", "out"):
         raise ValueError("BAD_REQUEST")
     if not contact or not isinstance(text, str):

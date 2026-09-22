@@ -296,7 +296,7 @@ class MeshChat(tk.Tk):
         cid = None
         try:
             cid = _contacts.resolve_contact(board.serial, name)
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):
             cid = None
         params: dict = {"text": text}
         if cid is not None:
@@ -321,7 +321,7 @@ class MeshChat(tk.Tk):
                                         epoch=0, sequence=0, text=text)
             finally:
                 conn.close()
-        except (ValueError, TypeError, OSError) as exc:
+        except (ValueError, TypeError, OSError, RuntimeError) as exc:
             self._dbg(f"history write failed: {exc}")
 
     def _pump(self) -> None:
@@ -333,7 +333,7 @@ class MeshChat(tk.Tk):
                 if board is not None:
                     try:
                         name = _contacts.name_for_id(board.serial, event.contact_id)
-                    except (ValueError, OSError):
+                    except (ValueError, OSError, RuntimeError):
                         name = None
                 who = name or f"id{event.contact_id}"
                 self._say(f"[{tag} <- {who}] {event.text}", "in")
@@ -400,7 +400,7 @@ class MeshChat(tk.Tk):
             cid = None
             try:
                 cid = _contacts.resolve_contact(board.serial, name) if name else None
-            except (ValueError, OSError):
+            except (ValueError, OSError, RuntimeError):
                 cid = None
             if cid is None:
                 self._dbg(f"{'block' if blocked else 'unblock'}: unknown contact '{name}'")
@@ -416,7 +416,7 @@ class MeshChat(tk.Tk):
         name = self.target_var.get().strip()
         try:
             cid = _contacts.resolve_contact(board.serial, name) if name else None
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):
             cid = None
         if cid is None:
             self._dbg(f"delete: unknown contact '{name}'")
@@ -493,7 +493,7 @@ class MeshChat(tk.Tk):
         if isinstance(contact_id, int) and 1 <= contact_id <= 2:
             try:
                 _contacts.set_contact(board.serial, name, contact_id)
-            except (ValueError, OSError) as exc:
+            except (ValueError, OSError, RuntimeError) as exc:
                 self._dbg(f"mapping write failed: {exc}")
 
     # ---- device (sudo-free) ------------------------------------------------------
@@ -567,6 +567,8 @@ class MeshChat(tk.Tk):
 
 def main() -> None:
     """``meshchat`` entry point (no args; everything is buttons)."""
+    import os as _os
+    _history.DISABLED = _os.environ.get("MESHCTL_NO_HISTORY", "").strip().lower() in ("1", "true", "yes")
     app = MeshChat()
     app.mainloop()
 

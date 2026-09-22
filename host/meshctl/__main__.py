@@ -67,8 +67,28 @@ def _do_exchange(args: argparse.Namespace, op: str, params: dict | None) -> dict
         return _firmware_error(str(reply.get("error", "UNKNOWN")))
     return reply
 
+_NO_HISTORY = False
+
+
+def _record_out(port: str, contact: str, text: str) -> None:
+    """Best-effort outbound history write; skipped under --no-history."""
+    if _NO_HISTORY:
+        return
+    try:
+        conn = history.open_history(_local.history_path_for(port))
+        try:
+            history.record_message(conn, contact=contact, direction="out", epoch=0, sequence=0, text=text)
+        finally:
+            conn.close()
+    except (ValueError, TypeError, OSError, RuntimeError) as exc:
+        print(f"meshctl: warning: history write failed: {exc}", file=sys.stderr)
+
+
 def _note_received(port: str, evt: dict) -> None:
     """Show an interleaved ``received`` event and keep it in history."""
+    if _NO_HISTORY:
+        print(json.dumps(evt, ensure_ascii=False), file=sys.stderr)
+        return
     contact_id = evt.get("contact_id")
     serial = contacts.serial_for_port(port)
     label = contacts.name_for_id(serial, contact_id) if isinstance(contact_id, int) else None
@@ -88,7 +108,7 @@ def _note_received(port: str, evt: dict) -> None:
             )
         finally:
             conn.close()
-    except (ValueError, TypeError, OSError) as exc:
+    except (ValueError, TypeError, OSError, RuntimeError) as exc:
         print(f"meshctl: warning: history write failed: {exc}", file=sys.stderr)
 
 
@@ -282,14 +302,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     if not reply.get("ok"):
         return _firmware_error(str(reply.get("error", "UNKNOWN")))
     status = reply.get("result", {}).get("status", "")
-    try:
-        conn = history.open_history(_local.history_path_for(args.port))
-        try:
-            history.record_message(conn, contact=args.contact, direction="out", epoch=0, sequence=0, text=args.text)
-        finally:
-            conn.close()
-    except (ValueError, TypeError, OSError) as exc:
-        print(f"meshctl: warning: history write failed: {exc}", file=sys.stderr)
+    _record_out(args.port, args.contact, args.text)
     if status == "ACKNOWLEDGED":
         print("ACKNOWLEDGED")
         return 0
@@ -330,8 +343,8 @@ def cmd_delete(args: argparse.Namespace) -> int:
             n = history.forget_contact(conn, args.contact)
         conn.close()
         print(f"deleted {describe} (slot freed locally and on board; {n} local message rows scrubbed)")
-    except OSError as exc:
-        print(f"deleted {describe} (slot freed locally and on board; history scrub failed: {exc})")
+    except (OSError, RuntimeError) as exc:
+        print(f"deleted {describe} (slot freed locally and on board; history scrub skipped: {exc})")
     return 0
 
 
@@ -433,8 +446,18 @@ def cmd_pair_import(args: argparse.Namespace) -> int:
         return _err(f"firmware reported invalid contact_id {contact_id!r}; mappings unchanged")
     try:
         contacts.set_contact(contacts.serial_for_port(args.port), args.name, contact_id)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
         return _err(f"activation ok but mapping write failed (trust lives in firmware): {exc}")
+    # D3: activation completes the ceremony; prune the QR audit records
+    # (they leak the pairing graph). Keep failures non-fatal.
+    try:
+        for stale in _local.records_dir().glob(f"{kind}-*.txt"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
     print(f"contact '{args.name}' activated as id {contact_id} (mapping saved locally)")
     return 0
 
@@ -620,14 +643,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 continue
             status = reply.get("result", {}).get("status", "")
             print(status)
-            try:
-                conn = history.open_history(_local.history_path_for(args.port))
-                try:
-                    history.record_message(conn, contact=target_name, direction="out", epoch=0, sequence=0, text=line)
-                finally:
-                    conn.close()
-            except (ValueError, TypeError, OSError) as exc:
-                print(f"meshctl: warning: history write failed: {exc}", file=sys.stderr)
+            _record_out(args.port, target_name, line)
     except KeyboardInterrupt:
         pass
     finally:
@@ -643,6 +659,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", default="usb", choices=["usb", "tcp"], help="usb CDC (default) or TCP over WiFi (firmware TCP server, port 7777)")
     parser.add_argument("--tcp-host", default="127.0.0.1", help="WiFi target host (only with --transport tcp)")
     parser.add_argument("--tcp-port", type=int, default=7777, help="WiFi target port (default 7777, mirrors firmware wifi.rs TCP_PORT)")
+    parser.add_argument("--no-history", action="store_true", help="do not write plaintext message history (D1: history SQLite is operator-convenience logging, never secure storage)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="firmware status")
@@ -716,6 +733,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    global _NO_HISTORY
+    _NO_HISTORY = bool(getattr(args, "no_history", False))
+    history.DISABLED = _NO_HISTORY
     if not hasattr(args, "timeout"):
         args.timeout = serial_link.DEFAULT_TIMEOUT
     try:

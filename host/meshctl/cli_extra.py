@@ -233,7 +233,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         return _err(str(exc))
     try:
         rows = _history.recent_messages(conn, args.limit)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
         return _err(str(exc))
     finally:
         conn.close()

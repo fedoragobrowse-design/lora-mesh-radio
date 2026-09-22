@@ -334,7 +334,7 @@ def _preserve_events(port: str, events: list) -> None:
                 )
             finally:
                 conn.close()
-        except (ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError, RuntimeError):
             pass
         print(json.dumps(evt, ensure_ascii=False), file=sys.stderr)
 
