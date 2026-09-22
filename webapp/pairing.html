@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pairing help — mesh webapp</title>
+<style>
+  body { background:#10140F; color:#E6E1D3;
+         font:15px/1.6 "DejaVu Sans", system-ui, sans-serif;
+         max-width:640px; margin:0 auto; padding:24px; }
+  a { color:#7DC98F; }
+  .warn { background:#3a2c12; border-radius:8px; padding:10px 14px; }
+  code { background:#182019; padding:1px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<p><a href="/">← back to conversations</a></p>
+<h1>Pairing help</h1>
+<p>This page only explains the steps. It never touches keys: key agreement
+and message encryption live in firmware (Rust), never in the browser or in
+any Python on this host.</p>
+<ol>
+  <li>On board A, export an <strong>offer</strong> (TUI: <code>/pair offer</code>;
+      app: Pairing → Offer; webapp: ask the operator running the bridge).</li>
+  <li>Carry the QR image to board B and <strong>import</strong> it under a
+      local display name (1–32 chars). Repeat in the other direction with a
+      <strong>proof</strong>, then a <strong>confirm</strong>.</li>
+  <li class="warn"><strong>SAS compare reminder:</strong> read the
+      fingerprint / SAS transcript aloud on <strong>BOTH</strong> sides and
+      only type YES when both operators see the same string. A mismatch means
+      stop — do not confirm.</li>
+  <li>Send a test message. Look for the ✓✓ tick (firmware
+      <code>ACKNOWLEDGED</code>). ✗ means <code>UNCONFIRMED</code>: peer off,
+      radio off, or out of range.</li>
+</ol>
+<p>Radio stays on the fixed +2dBm profile; there is nothing to tune here.</p>
+</body>
+</html>

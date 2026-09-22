@@ -1,9 +1,15 @@
 """meshchat: bench console for the three-node Pico LoRa mesh.
 
-A signals-console UI: station roster (left), traffic log (center),
-rig control (right). Boards are keyed by USB serial, never ``ttyACM``.
-Outbound traffic reads amber, inbound moss, faults red — TX/RX color
-is radio domain language. Monospace is the terminal voice of the log.
+Meshtastic-style threads: sidebar conversations (board sections +
+contact threads with unread badges) -> thread pane (message bubbles
+grouped by contact, backed by history SQLite reads) -> input bar.
+Per-message states: queued (◷) / sent (✓) / ACKED (✓✓) / failed (✗).
+The header shows board label, epoch/time_valid, radio on/off, and
+last counters.
+
+Boards are keyed by USB serial, never ``ttyACM``. Outbound traffic
+reads amber, inbound moss, faults red — TX/RX color is radio domain
+language. Monospace is the terminal voice of the log.
 
 Run: ``.venv/bin/meshchat`` (same venv as meshctl; stdlib Tk only).
 The app owns every attached port while running; ``meshctl chat`` /
@@ -37,9 +43,45 @@ MONO = ("DejaVu Sans Mono", 10)
 SANS = ("DejaVu Sans", 10)
 CALLSIGN = ("DejaVu Sans Mono", 22, "bold")
 
+FIRST_RUN_HELP = (
+    "No conversations yet — the 30-second start:\n\n"
+    "1. Click Scan, then Attach each station below.\n"
+    "2. Click a contact thread on the left (or type a new name\n"
+    "   in Send-to + Enter to start a thread).\n"
+    "3. Type a message + Enter to send.\n"
+    "   ◷ queued · ✓ sent · ✓✓ ACKED · ✗ not delivered\n\n"
+    "Pairing a new contact: Offer here, import the QR on the other\n"
+    "board, then compare the SAS fingerprints aloud on BOTH sides\n"
+    "before confirming. Radio stays on the fixed +2dBm profile."
+)
+
+TICKS = {"queued": "◷", "sent": "✓", "acked": "✓✓", "failed": "✗"}
+
+
+class Msg:
+    """One bubble in a thread."""
+
+    __slots__ = ("direction", "text", "state")
+
+    def __init__(self, direction: str, text: str, state: str) -> None:
+        self.direction = direction  # "in" | "out"
+        self.text = text
+        self.state = state  # "in" | "queued" | "sent" | "acked" | "failed"
+
+
+class Thread:
+    """One (board, contact) conversation."""
+
+    __slots__ = ("contact", "msgs", "unread")
+
+    def __init__(self, contact: str) -> None:
+        self.contact = contact
+        self.msgs: list[Msg] = []
+        self.unread = 0
+
 
 class MeshChat(tk.Tk):
-    """Root window: stations, traffic, rig control."""
+    """Root window: thread sidebar, thread pane, rig control."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -48,9 +90,14 @@ class MeshChat(tk.Tk):
         self.configure(bg=VOID)
         self.bus = _bus.EventBus()
         self.known: dict[str, _boards.Board] = {}  # serial -> last probe
-        self.current: str = ""  # selected board serial
-        self.targets: dict[str, str] = {}  # board serial -> contact name
-        self._station_widgets: dict[str, tuple[ttk.Frame, tk.Canvas, ttk.Frame]] = {}
+        self.threads: dict[str, dict[str, Thread]] = {}
+        self.info: dict[str, dict] = {}  # serial -> live header facts
+        self.current = ""  # selected board serial
+        self.sel_thread: str | None = None
+        self.attached: set[str] = set()
+        self._send_seq = 0
+        self._bus_seq: dict[str, int] = {}
+        self.pending: dict[int, tuple[str, str, str, int | None]] = {}
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._style()
         self._build()
@@ -68,6 +115,8 @@ class MeshChat(tk.Tk):
         style.configure("TLabel", background=VOID, foreground=PAPER, font=SANS)
         style.configure("Panel.TLabel", background=PANEL, foreground=PAPER)
         style.configure("Dim.TLabel", background=VOID, foreground=DIM, font=SANS)
+        style.configure("Active.TLabel", background="#3A4A3C", foreground=PAPER, font=SANS)
+        style.configure("Board.TLabel", background=PANEL, foreground=AMBER, font=SANS)
         style.configure("Call.TLabel", background=PANEL, foreground=PAPER, font=CALLSIGN)
         style.configure("TButton", background=PANEL_EDGE, foreground=PAPER,
                         font=SANS, borderwidth=0, padding=(8, 4))
@@ -88,29 +137,29 @@ class MeshChat(tk.Tk):
 
         left = ttk.Frame(layout, width=250, style="Panel.TFrame")
         layout.add(left, weight=1)
-        ttk.Label(left, text="Stations", style="Panel.TLabel").pack(
+        ttk.Label(left, text="Conversations", style="Panel.TLabel").pack(
             anchor="w", padx=8, pady=(8, 2))
-        self.station_box = ttk.Frame(left, style="Panel.TFrame")
-        self.station_box.pack(fill="x", padx=8, pady=2)
-        self._station_widgets: dict[str, tuple[ttk.Frame, tk.Canvas, ttk.Label]] = {}
+        self.thread_box = ttk.Frame(left, style="Panel.TFrame")
+        self.thread_box.pack(fill="both", expand=True, padx=8, pady=2)
         row = ttk.Frame(left, style="Panel.TFrame")
         row.pack(fill="x", padx=8, pady=4)
         ttk.Button(row, text="Scan", command=self._scan).pack(side="left")
-        ttk.Button(row, text="Attach", command=self._attach).pack(side="left", padx=4)
-        ttk.Button(row, text="Detach", command=self._detach).pack(side="left")
-        ttk.Label(left, text="Send to", style="Panel.TLabel").pack(anchor="w", padx=8)
+        ttk.Button(row, text="Attach", command=self._attach_all).pack(side="left", padx=4)
+        ttk.Button(row, text="Detach", command=self._detach_all).pack(side="left")
+        ttk.Label(left, text="Send to (new thread)", style="Panel.TLabel").pack(
+            anchor="w", padx=8)
         self.target_var = tk.StringVar()
         self.target_entry = ttk.Combobox(left, textvariable=self.target_var, width=20)
         self.target_entry.pack(fill="x", padx=8, pady=2)
         self.target_entry.bind("<Return>", lambda _e: self._set_target())
-        self.detail = ttk.Label(left, text="No station selected",
+        self.detail = ttk.Label(left, text="Scan, then Attach, then pick a thread",
                                 style="Panel.TLabel", wraplength=230,
                                 justify="left")
         self.detail.pack(anchor="w", padx=8, pady=(6, 8))
 
         center = ttk.Frame(layout)
         layout.add(center, weight=4)
-        self.center_head = ttk.Label(center, text="Traffic")
+        self.center_head = ttk.Label(center, text="Thread — no station selected")
         self.center_head.pack(anchor="w", padx=8, pady=(8, 0))
         self.log = tk.Text(center, wrap="word", state="disabled", height=24,
                            bg=VOID, fg=PAPER, font=MONO, relief="flat",
@@ -178,12 +227,141 @@ class MeshChat(tk.Tk):
         for column in range(columns):
             inner.columnconfigure(column, weight=1)
 
-    # ---- helpers ---------------------------------------------------------
-    def _say(self, text: str, tag: str = "") -> None:
+    # ---- thread model ------------------------------------------------------
+    def _names(self, serial: str) -> list[str]:
+        """Mapped contacts first, then live-only peers, stable order."""
+        live = list(self.threads.get(serial, {}).keys())
+        fresh = [n for n in _contacts.names_for(serial) if n not in self.threads.get(serial, {})]
+        for name in fresh:
+            self.threads.setdefault(serial, {})[name] = Thread(name)
+        return live + fresh
+
+    def _get_thread(self, serial: str, contact: str) -> Thread:
+        return self.threads.setdefault(serial, {}).setdefault(contact, Thread(contact))
+
+    def _board(self) -> _boards.Board | None:
+        return self.known.get(self.current)
+
+    def _select(self, serial: str, contact: str | None = None) -> None:
+        board = self.known.get(serial)
+        if board is None:
+            return
+        self.current = serial
+        if contact is not None:
+            self.sel_thread = contact
+            thread = self.threads.get(serial, {}).get(contact)
+            if thread is not None:
+                thread.unread = 0
+        elif self.sel_thread not in self.threads.get(serial, {}):
+            names = self._names(serial)
+            self.sel_thread = names[0] if names else None
+        self._render_sidebar()
+        self._render_thread()
+        self._render_header()
+
+    def _render_sidebar(self) -> None:
+        for widget in self.thread_box.winfo_children():
+            widget.destroy()
+        if not self.known:
+            ttk.Label(self.thread_box, text=FIRST_RUN_HELP.split("\n")[0],
+                      style="Panel.TLabel", wraplength=230,
+                      justify="left").pack(anchor="w")
+            return
+        for serial, board in self.known.items():
+            info = self.info.get(serial, {})
+            label = info.get("label", board.label) or serial[:8]
+            attached = " ●" if serial in self.attached else ""
+            ttk.Label(self.thread_box, text=f"{label}{attached}",
+                      style="Board.TLabel").pack(anchor="w", pady=(6, 0))
+            names = self._names(serial)
+            if not names:
+                ttk.Label(self.thread_box, text="  (type a name below)",
+                          style="Panel.TLabel").pack(anchor="w")
+            for name in names:
+                thread = self.threads[serial][name]
+                badge = f" ({thread.unread})" if thread.unread else ""
+                row = ttk.Frame(self.thread_box, style="Panel.TFrame")
+                row.pack(fill="x")
+                style = "Active.TLabel" if (serial == self.current
+                                            and name == self.sel_thread) else "Panel.TLabel"
+                lbl = ttk.Label(row, text=f"  {name}{badge}", style=style)
+                lbl.pack(side="left", fill="x", expand=True)
+                lbl.bind("<Button-1>", lambda _e, s=serial, n=name: self._select(s, n))
+                row.bind("<Button-1>", lambda _e, s=serial, n=name: self._select(s, n))
+
+    def _render_header(self) -> None:
+        board = self._board()
+        if board is None:
+            self.center_head.configure(text="Thread — no station selected")
+            self.detail.configure(text="Scan, then Attach, then pick a thread")
+            return
+        info = self.info.get(board.serial, {})
+        label = info.get("label", board.label) or "?"
+        epoch = info.get("epoch", board.epoch)
+        tvalid = info.get("time_valid", board.time_valid)
+        radio = info.get("radio_enabled", board.radio_enabled)
+        counters = info.get("counters", board.counters) or {}
+        tx = counters.get("tx_ok", counters.get("tx", "?"))
+        rx = counters.get("rx_ok", counters.get("rx", "?"))
+        contact = self.sel_thread or "no thread"
+        self.center_head.configure(
+            text=f"{label} → {contact} · epoch {epoch} "
+                 f"{'⏱ok' if tvalid else '⏱--'} · radio {'ON' if radio else 'OFF'} "
+                 f"· tx {tx}/rx {rx}")
+        self.detail.configure(
+            text=f"{board.device}\n{board.image} rv={board.radio_version} "
+                 f"epoch={epoch} contacts={board.contacts.get('count', '?')}")
+
+    def _render_thread(self) -> None:
         self.log.configure(state="normal")
-        self.log.insert("end", text + "\n", tag)
+        self.log.delete("1.0", "end")
+        thread = None
+        if self.current and self.sel_thread:
+            thread = self.threads.get(self.current, {}).get(self.sel_thread)
+        if thread is None or not thread.msgs:
+            if not any(self.threads.get(s) for s in self.threads):
+                self.log.insert("end", FIRST_RUN_HELP + "\n", "dim")
+            else:
+                name = self.sel_thread or "this thread"
+                self.log.insert(
+                    "end",
+                    f"No messages with {name} yet — type below + Enter to send.\n"
+                    "◷ queued · ✓ sent · ✓✓ ACKED · ✗ not delivered\n", "dim")
+        else:
+            for msg in thread.msgs[-200:]:
+                if msg.direction == "in":
+                    self.log.insert("end", f"← {msg.text}\n", "in")
+                else:
+                    tick = TICKS.get(msg.state, "?")
+                    self.log.insert("end", f"  {msg.text} {tick}\n", "out")
         self.log.see("end")
         self.log.configure(state="disabled")
+
+    def _push(self, serial: str, contact: str, direction: str,
+              text: str, state: str) -> None:
+        thread = self._get_thread(serial, contact)
+        thread.msgs.append(Msg(direction, text[:300], state))
+        del thread.msgs[:-200]
+        if serial == self.current and contact == self.sel_thread:
+            thread.unread = 0
+            self._render_thread()
+        else:
+            thread.unread += 1
+            self._render_sidebar()
+
+    def _set_state(self, serial: str, contact: str, text: str,
+                   old: tuple[str, ...], new: str) -> None:
+        thread = self.threads.get(serial, {}).get(contact)
+        if thread is None:
+            return
+        for msg in reversed(thread.msgs):
+            if msg.direction == "out" and msg.text == text and msg.state in old:
+                msg.state = new
+                break
+        if serial == self.current and contact == self.sel_thread:
+            self._render_thread()
+
+    # ---- helpers ---------------------------------------------------------
 
     def _dbg(self, text: str) -> None:
         self.debug.configure(state="normal")
@@ -194,90 +372,116 @@ class MeshChat(tk.Tk):
     def _status(self, text: str) -> None:
         self.statusline.configure(text=text)
 
-    def _board(self) -> _boards.Board | None:
-        return self.known.get(self.current)
+    def _request(self, serial: str, op: str, params: dict | None,
+                 timeout: float) -> int:
+        nxt = self._bus_seq.get(serial, 0) + 1
+        self._bus_seq[serial] = nxt
+        self.bus.request(serial, op, params, timeout=timeout)
+        return nxt
+
 
     # ---- stations ----------------------------------------------------------
     def _scan(self) -> None:
         found = _boards.probe_all(timeout=5.0)
         self.known = {b.serial: b for b in found}
-        for widget in self.station_box.winfo_children():
-            widget.destroy()
-        self._station_widgets.clear()
-        if not found:
+        for serial, board in self.known.items():
+            self.threads.setdefault(serial, {})
+            self.info[serial] = {
+                "label": board.label, "epoch": board.epoch,
+                "time_valid": board.time_valid,
+                "radio_enabled": board.radio_enabled,
+                "radio_available": board.radio_available,
+                "counters": dict(board.counters), "contacts": board.contacts,
+            }
+            for name in _contacts.names_for(serial):
+                self.threads[serial].setdefault(name, Thread(name))
+            self._load_history(board)
+        if found:
+            first = found[0].serial
+            names = self._names(first)
+            self._select(first, names[0] if names else None)
+        else:
             self._dbg("scan: no CDC mesh nodes (check USB cables)")
             self._status("No stations")
+            self._render_sidebar()
+            self._render_thread()
+            self._render_header()
             return
-        for board in found:
-            self._station_row(board)
         self._dbg(f"scan: {len(found)} station(s) probed by matched-ID status")
         self._status(f"{len(found)} stations")
 
-    def _station_row(self, board: _boards.Board) -> None:
-        frame = ttk.Frame(self.station_box, style="Panel.TFrame")
-        frame.pack(fill="x", pady=2)
-        lamp = tk.Canvas(frame, width=14, height=22, bg=PANEL, highlightthickness=0)
-        lamp.pack(side="left", padx=(2, 6))
-        color = FAULT if board.error else (MOSS if board.radio_enabled else DIM)
-        lamp.create_oval(2, 6, 12, 16, fill=color, outline="")
-        text = ttk.Frame(frame, style="Panel.TFrame")
-        text.pack(side="left", fill="x", expand=True)
-        ttk.Label(text, text=board.label or "?", style="Call.TLabel").pack(anchor="w")
-        sub = board.serial[:8]
-        if board.error:
-            sub += f" {board.error[:40]}"
-        ttk.Label(text, text=sub, style="Panel.TLabel").pack(anchor="w")
-        frame.bind("<Button-1>", lambda _e, serial=board.serial: self._select(serial))
-        for child in list(text.winfo_children()) + [text]:
-            child.bind("<Button-1>", lambda _e, serial=board.serial: self._select(serial))
-        self._station_widgets[board.serial] = (frame, lamp, text)
-
-    def _select(self, serial: str) -> None:
-        board = self.known.get(serial)
-        if board is None:
+    def _load_history(self, board: _boards.Board) -> None:
+        """Seed threads from the per-port history SQLite (oldest-first)."""
+        try:
+            conn = _history.open_history(_local.history_path_for(board.device))
+        except (ValueError, TypeError, OSError, RuntimeError):
+            return  # DISABLED (--no-history): live traffic only
+        try:
+            rows = _history.recent_messages(conn, limit=200)
+        except (ValueError, TypeError, OSError, RuntimeError):
+            try:
+                conn.close()
+            except Exception:
+                pass
             return
-        self.current = serial
-        self.center_head.configure(
-            text=f"Traffic — {board.label or '?'} {serial[:8]}")
-        self.detail.configure(
-            text=f"{board.device}\n{board.image} rv={board.radio_version} "
-                 f"epoch={board.epoch} contacts={board.contacts.get('count', '?')}")
-        names = self._contact_names(board)
-        self.target_entry["values"] = names
-        if self.targets.get(serial) in names:
-            self.target_var.set(self.targets[serial])
+        try:
+            for contact, direction, _epoch, _seq, text in reversed(rows):
+                thread = self._get_thread(board.serial, str(contact))
+                thread.msgs.append(Msg(direction, str(text)[:300],
+                                       "in" if direction == "in" else "acked"))
+                del thread.msgs[:-200]
+        finally:
+            conn.close()
 
-    def _on_select(self, _event: object = None) -> None:
-        return None
-
-    def _contact_names(self, board: _boards.Board) -> list[str]:
-        # Serial-keyed local mappings first, then every other attached board
-        # label as a pairing candidate (import flow will map it on success).
-        names = _contacts.names_for(board.serial)
-        for serial, known in self.known.items():
-            label = known.label or ""
-            if serial != board.serial and label and label not in names:
-                names.append(label)
-        return names
-
-
-    def _attach(self) -> None:
+    def _attach_all(self) -> None:
         board = self._board()
         if board is None:
-            self._dbg("attach: select a scanned station first")
+            self._dbg("attach: Scan first, then select a station")
             return
         self.bus.attach(board.serial, board.device, board.label)
-        self.targets.setdefault(board.serial, "")
+        self.attached.add(board.serial)
         self._status(f"Attached {board.label or board.serial[:8]}")
+        self._render_sidebar()
+        self._render_header()
+
+    def _attach(self) -> None:
+        self._attach_all()
 
     def _detach(self) -> None:
         if self.current:
             self.bus.detach(self.current)
+            self.attached.discard(self.current)
             self._status("Idle")
+            self._render_sidebar()
+            self._render_header()
+
+    def _detach_all(self) -> None:
+        self._detach()
+
+
+    def _station_row(self, board: _boards.Board) -> None:
+        # Legacy probe path: fold a re-probed board into the sidebar.
+        self.known[board.serial] = board
+        self._render_sidebar()
+        self._render_header()
+
+    def _on_select(self, _event: object = None) -> None:
+        return None
 
     def _set_target(self) -> None:
-        if self.current:
-            self.targets[self.current] = self.target_var.get().strip()
+        name = self.target_var.get().strip()
+        if not name:
+            return
+        board = self._board()
+        if board is None:
+            self._dbg("send-to: Scan + Attach first")
+            return
+        if not _contacts.valid_name(name):
+            self._dbg("send-to: name must be 1-32 non-blank chars")
+            return
+        self._get_thread(board.serial, name)
+        self._select(board.serial, name)
+        self.target_var.set("")
 
     # ---- traffic -------------------------------------------------------------
     def _send(self) -> None:
@@ -286,13 +490,12 @@ class MeshChat(tk.Tk):
             return
         board = self._board()
         if board is None:
-            self._dbg("send: no station selected")
+            self._dbg("send: no station selected (Scan + Attach first)")
             return
-        name = self.target_var.get().strip()
+        name = self.sel_thread or ""
         if not name:
-            self._dbg("send: set a send-to contact first")
+            self._dbg("send: pick a thread on the left first")
             return
-        self.targets[board.serial] = name
         cid = None
         try:
             cid = _contacts.resolve_contact(board.serial, name)
@@ -307,8 +510,10 @@ class MeshChat(tk.Tk):
         if len(text.encode("utf-8")) > 160 or not text:
             self._dbg("send: text must be 1-160 UTF-8 bytes, never truncated")
             return
-        self.bus.request(board.serial, "send", params, timeout=60.0)
-        self._say(f"[{board.label or '?'} -> {name}] {text}", "out")
+        bus_id = self._request(board.serial, "send", params, timeout=60.0)
+        self._send_seq += 1
+        self.pending[self._send_seq] = (board.serial, name, text, bus_id)
+        self._push(board.serial, name, "out", text, "sent")
         self._status(f"Sending to {name}…")
         self._remember(board, name, "out", text)
         self.entry.delete(0, "end")
@@ -336,7 +541,7 @@ class MeshChat(tk.Tk):
                     except (ValueError, OSError, RuntimeError):
                         name = None
                 who = name or f"id{event.contact_id}"
-                self._say(f"[{tag} <- {who}] {event.text}", "in")
+                self._push(event.board, who, "in", event.text, "in")
                 if board is not None:
                     self._remember(board, who, "in", event.text)
             elif event.kind == "reply":
@@ -347,17 +552,50 @@ class MeshChat(tk.Tk):
                     continue
                 result = obj.get("result", {}) if isinstance(obj, dict) else {}
                 status = result.get("status", "") if isinstance(result, dict) else ""
+                if isinstance(result, dict) and ("epoch" in result or "counters" in result
+                                                 or "label" in result):
+                    info = self.info.setdefault(event.board, {})
+                    for key in ("label", "epoch", "time_valid", "radio_enabled",
+                                "radio_available", "counters", "contacts"):
+                        if key in result:
+                            info[key] = result[key]
+                    self._render_sidebar()
+                    self._render_header()
+                    if not status:
+                        continue
                 if status == "ACKNOWLEDGED":
-                    self._say(f"[{tag}] acknowledged", "dim")
-                    self._status(f"{tag} acknowledged")
+                    op_id = self._match(event.board, obj.get("id"))
+                    if op_id is not None:
+                        s, name, text, _bus = self.pending.pop(op_id)
+                        self._set_state(s, name, text, ("sent", "queued"), "acked")
+                    self._status(f"{tag} acknowledged ✓✓")
+                elif status == "UNCONFIRMED":
+                    op_id = self._match(event.board, obj.get("id"))
+                    if op_id is not None:
+                        s, name, text, _bus = self.pending.pop(op_id)
+                        self._set_state(s, name, text, ("sent", "queued"), "failed")
+                    self._status(f"{tag}: not delivered ✗")
+                    self._dbg(f"[{tag}] UNCONFIRMED (peer off, radio off, or out of range)")
                 elif status:
-                    self._say(f"[{tag}] {status}", "fault")
                     self._status(f"{tag}: {status}")
+                    self._dbg(f"[{tag}] {status}")
                 else:
                     self._dbg(f"[{tag}] reply: {event.text[:200]}")
             else:
                 self._dbg(f"[{tag}] {event.text[:200]}")
         self.after(200, self._pump)
+
+    def _match(self, serial: str, reply_id: object) -> int | None:
+        """Oldest pending send op for `serial` with the reply id."""
+        if type(reply_id) is int:
+            for op_id in sorted(self.pending):
+                s, _n, _t, bus_id = self.pending[op_id]
+                if s == serial and bus_id == reply_id:
+                    return op_id
+        for op_id in sorted(self.pending):
+            if self.pending[op_id][0] == serial:
+                return op_id
+        return None
 
     # ---- link ---------------------------------------------------------------
     def _op_status(self) -> None:
@@ -396,7 +634,7 @@ class MeshChat(tk.Tk):
             board = self._board()
             if board is None:
                 return
-            name = self.target_var.get().strip()
+            name = (self.sel_thread or "").strip()
             cid = None
             try:
                 cid = _contacts.resolve_contact(board.serial, name) if name else None
@@ -413,7 +651,7 @@ class MeshChat(tk.Tk):
         board = self._board()
         if board is None:
             return
-        name = self.target_var.get().strip()
+        name = (self.sel_thread or "").strip()
         try:
             cid = _contacts.resolve_contact(board.serial, name) if name else None
         except (ValueError, OSError, RuntimeError):

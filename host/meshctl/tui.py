@@ -1,18 +1,23 @@
-"""Terminal TUI for the mesh: board roster, contacts, live traffic, send box.
+"""Terminal TUI for the mesh: Meshtastic-style threads over the Pico fleet.
 
-Chat console: left column is the station roster (boards by label), center
-is the traffic log (inbound moss green, outbound amber, faults red), top
-is the `BOARD → contact` conversation header, bottom is the input line.
+Layout: sidebar conversations (board sections + contact threads with
+unread badges) -> thread pane (message bubbles grouped by contact,
+backed by history SQLite reads) -> input bar. Per-message states:
+queued (◷) / sent (✓) / ACKED (✓✓) / failed (✗). The header shows
+board label, epoch/time_valid, radio on/off, and last counters.
+
 Boards attach on start and stay owned until quit; `/quit` detaches all.
 
-Keys: Tab cycles boards (or completes a partial contact name), F2 opens
-the contact picker (Up/Down + Enter, Esc cancels), typing `/` opens the
-command palette (Up/Down + Enter), `/to NAME` targets, `/block NAME` +
-`/unblock NAME` + `/delete NAME` manage slots, `/radio on|off` (fixed
-+2dBm/SF7/BW500 profile, display-only), `/pair offer|proof|confirm`
-exports a pairing record, `/find TEXT` searches rooms + history, `/all TEXT`
-broadcasts via every board, `/debug` toggles raw-event view, `/status`,
-`/contacts`, `/quit`. Plain typing sends to the current target.
+Keys: Tab cycles boards, 1/2/3 jump to A/B/C, Up/Down switch thread,
+F2 opens the contact picker (Up/Down + Enter, Esc cancels), typing `/`
+opens the command palette (Up/Down + Enter), `/to NAME` targets a
+thread, `/block NAME` + `/unblock NAME` + `/delete NAME` manage slots,
+`/radio on|off` (fixed +2dBm/SF7/BW500 profile, display-only),
+`/pair offer|proof|confirm` exports a pairing record, `/find TEXT`
+searches threads + history, `/all TEXT` broadcasts via every board, `/debug`
+toggles raw-event view, `/status`, `/contacts`, `/settings [KEY]` (read-only),
+`/quit`.
+Plain typing sends to the current thread.
 """
 from __future__ import annotations
 
@@ -38,20 +43,66 @@ PALETTE = {
 }
 
 HELP_LINES = [
-    "1/2/3 talk as A/B/C · ←/→ switch contact · type + Enter sends · F2 all contacts · /quit leaves",
+    "Tab board · 1/2/3 A/B/C · Up/Down thread · type + Enter sends · F2 contacts · /quit leaves",
 ]
 
+# Shown in the thread pane until the first conversation exists.
+FIRST_RUN_HELP = [
+    "No conversations yet — here is the 30-second start:",
+    "",
+    "  1. Press F2 to pick a contact, or type /to NAME + Enter",
+    "  2. Type a message + Enter to send it",
+    "     ◷ queued · ✓ sent · ✓✓ ACKED · ✗ not delivered",
+    "  3. Tab switches board (A/B/C); Up/Down switches thread",
+    "",
+    "Pairing a new contact: /pair offer here, import the QR on the",
+    "other board, then compare the SAS fingerprints aloud on BOTH",
+    "sides before confirming. Radio stays on the fixed +2dBm profile.",
+]
+
+# Per-message state ticks (ACKNOWLEDGED -> ✓✓, UNCONFIRMED -> ✗).
+TICKS = {"queued": "◷", "sent": "✓", "acked": "✓✓", "failed": "✗", "in": "←"}
+
+
+class Msg:
+    """One bubble in a thread."""
+
+    __slots__ = ("direction", "text", "state")
+
+    def __init__(self, direction: str, text: str, state: str) -> None:
+        self.direction = direction  # "in" | "out"
+        self.text = text
+        self.state = state  # "in" | "queued" | "sent" | "acked" | "failed"
+
+
+class Thread:
+    """One (board, contact) conversation."""
+
+    __slots__ = ("contact", "msgs", "unread")
+
+    def __init__(self, contact: str) -> None:
+        self.contact = contact
+        self.msgs: list[Msg] = []
+        self.unread = 0
+
+    def push(self, msg: Msg) -> None:
+        self.msgs.append(msg)
+        del self.msgs[:-200]
+
+
 class Tui:
-    """Curses state: roster, target, log, input. Bus pumps events in."""
+    """Curses state: sidebar threads, thread pane, input. Bus pumps events in."""
+
     def __init__(self, stdscr: object, known: dict[str, object]) -> None:
         self.stdscr = stdscr
         self.bus = _bus.EventBus()
         self.known: dict[str, _boards.Board] = dict(known)
         self.order: list[str] = []
-        self.current = 0
-        self.targets: dict[str, str] = {}
-        self.contact_idx: dict[str, int] = {}
-        self.log: list[tuple[str, str]] = []
+        self.threads: dict[str, dict[str, Thread]] = {}
+        self.sel_board = 0
+        self.sel_thread: str | None = None
+        self.info: dict[str, dict] = {}  # serial -> live header facts
+        self.log: list[tuple[str, str]] = []  # debug/notice overflow
         self.input = ""
         self.picker = -1
         self.palette = -1
@@ -65,38 +116,150 @@ class Tui:
         self.pending_sends: dict[int, tuple[str, str, str, int, int | None]] = {}
         self._send_seq = 0
         self._bus_seq: dict[str, int] = {}
-        self.rooms: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for serial, board in self.known.items():
             assert isinstance(board, _boards.Board)
             self.bus.attach(board.serial, board.device, board.label)
             self.order.append(serial)
+            self.threads[serial] = {}
+            self.info[serial] = _snapshot(board)
+            self._load_history(board)
         if not self.order:
             self.status = "no boards attached (check USB)"
+        else:
+            self._fix_selection()
 
+    # ---- thread model --------------------------------------------------
     def board(self) -> _boards.Board | None:
         """Current board or None."""
         if not self.order:
             return None
-        return self.known.get(self.order[self.current % len(self.order)])
+        return self.known.get(self.order[self.sel_board % len(self.order)])
+
+    def serial(self) -> str | None:
+        board = self.board()
+        return board.serial if board is not None else None
+
+    def thread_names(self, serial: str) -> list[str]:
+        """Mapped contacts first, then live-only peers, stable order."""
+        names = [n for n in _contacts.names_for(serial)
+                 if n not in self.threads.get(serial, {})]
+        ordered = list(self.threads.get(serial, {}).keys()) + names
+        for name in names:
+            self.threads.setdefault(serial, {})[name] = Thread(name)
+        return ordered
+
+    def get_thread(self, serial: str, contact: str) -> Thread:
+        return self.threads.setdefault(serial, {}).setdefault(contact, Thread(contact))
+
+    def flat_threads(self) -> list[tuple[str, str]]:
+        """Every (serial, contact) row in sidebar order."""
+        rows = []
+        for serial in self.order:
+            for name in self.thread_names(serial):
+                rows.append((serial, name))
+        return rows
+
+    def current_thread(self) -> Thread | None:
+        serial = self.serial()
+        if serial is None or self.sel_thread is None:
+            return None
+        return self.threads.get(serial, {}).get(self.sel_thread)
+
+    def select(self, serial: str, contact: str | None) -> None:
+        """Select a board + thread; opening a thread clears its badge."""
+        if serial in self.order:
+            self.sel_board = self.order.index(serial)
+        self.sel_thread = contact
+        if contact is not None:
+            thread = self.threads.get(serial, {}).get(contact)
+            if thread is not None:
+                thread.unread = 0
+
+    def _fix_selection(self) -> None:
+        rows = self.flat_threads()
+        if not rows:
+            self.sel_thread = None
+            return
+        serial = self.serial()
+        if self.sel_thread is None or (serial, self.sel_thread) not in rows:
+            self.sel_board = 0
+            first = [c for s, c in rows if s == self.order[0]]
+            self.sel_thread = first[0] if first else rows[0][1]
+            self.sel_board = self.order.index(rows[0][0]) if not first else 0
+
+    def cycle_board(self, step: int = 1) -> None:
+        if not self.order:
+            return
+        self.sel_board = (self.sel_board + step) % len(self.order)
+        serial = self.order[self.sel_board]
+        names = self.thread_names(serial)
+        self.select(serial, names[0] if names else None)
+
+    def step_thread(self, step: int) -> None:
+        rows = self.flat_threads()
+        if not rows:
+            return
+        serial = self.serial()
+        try:
+            idx = rows.index((serial, self.sel_thread)) if self.sel_thread else -1
+        except ValueError:
+            idx = -1
+        nxt = rows[(idx + step) % len(rows)]
+        self.select(*nxt)
 
     def names(self, board: _boards.Board) -> list[str]:
         """Mapped names for this board (serial-keyed, arbitrary labels)."""
-        return _contacts.names_for(board.serial)
+        return self.thread_names(board.serial)
 
     def target(self, board: _boards.Board) -> str:
-        """Current send target name for this board."""
-        saved = self.targets.get(board.serial, "")
-        if saved and _contacts.valid_name(saved):
-            return saved
+        """Current send target name for this board (selected thread)."""
+        if board.serial == self.serial() and self.sel_thread:
+            return self.sel_thread
         names = self.names(board)
-        idx = self.contact_idx.get(board.serial, 0) % max(len(names), 1)
-        return names[idx] if names else ""
+        return names[0] if names else ""
 
     def complete(self, board: _boards.Board, frag: str) -> list[str]:
         """Mapped names starting with `frag` (case-insensitive)."""
         frag = frag.lower()
         return [n for n in self.names(board) if n.lower().startswith(frag)]
 
+    # ---- history ---------------------------------------------------------
+    def _load_history(self, board: _boards.Board) -> None:
+        """Seed threads from the per-port history SQLite (oldest-first)."""
+        try:
+            conn = _history.open_history(_local.history_path_for(board.device))
+        except (ValueError, TypeError, OSError, RuntimeError):
+            return  # DISABLED (--no-history): live traffic only, no artifact
+        try:
+            rows = _history.recent_messages(conn, limit=200)
+        except (ValueError, TypeError, OSError, RuntimeError):
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return
+        try:
+            for contact, direction, _epoch, _seq, text in reversed(rows):
+                thread = self.get_thread(board.serial, str(contact))
+                state = "in" if direction == "in" else "acked"
+                thread.msgs.append(Msg(direction, str(text)[:300], state))
+                del thread.msgs[:-200]
+        finally:
+            conn.close()
+
+    def _remember(self, board: _boards.Board, contact: str, direction: str,
+                  text: str, epoch: int = 0, sequence: int = 0) -> None:
+        try:
+            conn = _history.open_history(_local.history_path_for(board.device))
+            try:
+                _history.record_message(conn, contact=contact, direction=direction,
+                                        epoch=epoch, sequence=sequence, text=text)
+            finally:
+                conn.close()
+        except (ValueError, TypeError, OSError, RuntimeError):
+            pass  # DISABLED or unwritable: live view still works
+
+    # ---- bus ---------------------------------------------------------------
     def _request(self, serial: str, op: str, params: dict | None, timeout: float) -> int | None:
         """Bus request that predicts the board's reply id for send matching."""
         nxt = self._bus_seq.get(serial, 0) + 1
@@ -129,31 +292,40 @@ class Tui:
                 return op_id
         return None
 
+    def _set_state(self, serial: str, contact: str, text: str,
+                   old: str, new: str) -> None:
+        thread = self.threads.get(serial, {}).get(contact)
+        if thread is None:
+            return
+        for msg in reversed(thread.msgs):
+            if msg.direction == "out" and msg.text == text and msg.state == old:
+                msg.state = new
+                return
+
     def palette_items(self) -> list[str]:
         """Slash commands for the inline palette."""
         return [
-            "/to NAME", "/status", "/contacts", "/settings [KEY]", "/block NAME",
-            "/unblock NAME", "/delete NAME", "/radio on", "/radio off",
-            "/pair offer", "/pair proof", "/pair confirm", "/debug",
-            "/find TEXT", "/all TEXT", "/quit",
+            "/to NAME", "/status", "/contacts", "/settings [KEY]", "/radio on", "/radio off",
+            "/pair offer", "/pair proof", "/pair confirm",
+            "/block NAME", "/unblock NAME", "/delete NAME",
+            "/debug", "/find TEXT", "/all TEXT", "/quit",
         ]
 
-    def room_key(self, serial: str, peer: str) -> tuple[str, str]:
-        return (serial, peer)
-
-    def room_msg(self, serial: str, peer: str, text: str, style: str) -> None:
-        """Append to the per-contact chatroom and the shared log."""
-        self.rooms.setdefault(self.room_key(serial, peer), []).append((style, text[:300]))
-        self.rooms[self.room_key(serial, peer)][:] = self.rooms[self.room_key(serial, peer)][-200:]
-        self.say(text, style)
-
     def say(self, text: str, style: str = "paper") -> None:
-        """Append one log line, capped."""
+        """Append one overflow log line, capped (debug/notice view)."""
         self.log.append((style, text[:300]))
         del self.log[:-500]
 
+    def thread_msg(self, serial: str, peer: str, text: str, style: str,
+                   direction: str = "out", state: str = "sent") -> None:
+        """Append a bubble to one thread (no shared-log mixing)."""
+        thread = self.get_thread(serial, peer)
+        thread.push(Msg(direction, text[:300], state))
+        if serial != self.serial() or peer != self.sel_thread:
+            thread.unread += 1
+
     def pump(self) -> None:
-        """Drain the bus into the log with contact names resolved."""
+        """Drain the bus into threads with contact names resolved."""
         for event in self.bus.poll():
             board = self.known.get(event.board)
             tag = (board.label if board else event.board[:8]) or event.board[:8]
@@ -165,18 +337,17 @@ class Tui:
                     except (ValueError, OSError, RuntimeError):
                         name = None
                 who = name or f"id{event.contact_id}"
-                self.room_msg(event.board, who, f"[{tag} ← {who}] {event.text}", "moss")
+                self.thread_msg(event.board, who, event.text, "moss",
+                                direction="in", state="in")
+                if self.sel_thread is None and event.board == self.serial():
+                    self.select(event.board, who)
+                elif event.board == self.serial() and who == self.sel_thread:
+                    thread = self.threads.get(event.board, {}).get(who)
+                    if thread is not None:
+                        thread.unread = 0
                 if board is not None:
-                    try:
-                        conn = _history.open_history(_local.history_path_for(board.device))
-                        try:
-                            _history.record_message(conn, contact=who, direction="in",
-                                                    epoch=event.epoch, sequence=event.sequence,
-                                                    text=event.text)
-                        finally:
-                            conn.close()
-                    except (ValueError, TypeError, OSError, RuntimeError):
-                        pass
+                    self._remember(board, who, "in", event.text,
+                                   epoch=event.epoch, sequence=event.sequence)
             elif event.kind == "reply":
                 obj = self._parse_reply(event.text)
                 result = obj.get("result", {}) if isinstance(obj, dict) else {}
@@ -200,22 +371,37 @@ class Tui:
                     if len(rec) > 120:
                         self.say(rec[120:240], "paper")
                     self.say("full text in history file; compare fingerprint aloud", "dim")
-                elif "ACKNOWLEDGED" in event.text:
+                    continue
+                if isinstance(result, dict) and (
+                        "label" in result or "epoch" in result or "counters" in result):
+                    # status/contacts reply: refresh the header facts.
+                    info = self.info.setdefault(event.board, {})
+                    for key in ("label", "epoch", "time_valid", "radio_enabled",
+                                "radio_available", "counters", "contacts"):
+                        if key in result:
+                            info[key] = result[key]
+                    if isinstance(result.get("contacts"), dict):
+                        self.thread_names(event.board)
+                    if not self.debug:
+                        continue
+                    self.say(f"[{tag}] reply: {event.text[:160]}", "dim")
+                    continue
+                if "ACKNOWLEDGED" in event.text:
                     op_id = self._match_op(event.board, obj.get("id"))
                     if op_id is None:
                         op_id = self._oldest_op(event.board)
                     if op_id is not None:
                         s, name, text, _count, _bus = self.pending_sends.pop(op_id)
-                        self.room_msg(s, name, f"  ✓ sent · {text}", "dim")
-                    elif self.debug:
-                        self.say(f"[{tag}] reply: {event.text[:160]}", "dim")
+                        self._set_state(s, name, text, "sent", "acked")
                 elif "UNCONFIRMED" in event.text:
                     op_id = self._match_op(event.board, obj.get("id"))
                     if op_id is None:
                         op_id = self._oldest_op(event.board)
                     if op_id is not None:
                         s, name, text, _count, _bus = self.pending_sends.pop(op_id)
-                        self.room_msg(s, name, f"  ✗ not sent (no ACK) · {text}", "fault")
+                        self._set_state(s, name, text, "sent", "failed")
+                        self._set_state(s, name, text, "queued", "failed")
+                        self.say(f"[{tag} → {name}] ✗ not delivered (no ACK)", "fault")
                     elif self.debug:
                         self.say(f"[{tag}] reply: {event.text[:160]}", "dim")
                 elif '"error":"BUSY"' in event.text.replace(" ", "") or '"error":"CHANNEL_BUSY"' in event.text.replace(" ", ""):
@@ -227,17 +413,21 @@ class Tui:
                             self.say(f"[{tag}] reply: {event.text[:160]}", "dim")
                     elif self.retry_send(event.board, event.text, op_id):
                         s, name, text, count, _bus = self.pending_sends[op_id]
-                        self.room_msg(s, name, f"  … busy, retry {count}/2 · {text}", "dim")
+                        self._set_state(s, name, text, "queued", "queued")
+                        self.say(f"[{tag}] … busy, retry {count}/2", "dim")
                     else:
                         entry = self.pending_sends.pop(op_id, None)
                         if entry is not None:
                             s, name, text, _count, _bus = entry
+                            self._set_state(s, name, text, "queued", "failed")
+                            self._set_state(s, name, text, "sent", "failed")
                 elif self.debug:
                     self.say(f"[{tag}] reply: {event.text[:160]}", "dim")
             elif event.kind == "error":
                 self.say(f"[{tag}] {event.text[:160]}", "fault")
             else:
                 self.say(f"[{tag}] {event.text[:160]}", "dim")
+
     def retry_send(self, serial: str, reply_text: str, op_id: int) -> bool:
         """Retry one BUSY-stale send op, max 2 attempts (entry kept for reply)."""
         entry = self.pending_sends.get(op_id)
@@ -257,7 +447,7 @@ class Tui:
         return True
 
     def send_current(self) -> None:
-        """Send the input line to the current target."""
+        """Send the input line to the current thread."""
         text = self.input
         self.input = ""
         if not text.strip():
@@ -268,29 +458,26 @@ class Tui:
             return
         name = self.target(board)
         if not name:
-            self.say("no target: /to NAME or pair-import first", "fault")
+            self.say("no thread: F2 or /to NAME first (see help above)", "fault")
             return
         cid = _contacts.resolve_contact(board.serial, name)
         if cid is None:
             self.say(f"unknown contact '{name}'", "fault")
             return
         bus_id = self._request(board.serial, "send",
-                             {"contact_id": cid, "text": text}, timeout=60.0)
+                               {"contact_id": cid, "text": text}, timeout=60.0)
         self._send_seq += 1
         self.pending_sends[self._send_seq] = (board.serial, name, text, 0, bus_id)
-        self.room_msg(board.serial, name, f"[{board.label or '?'} → {name}] {text}", "amber")
-        try:
-            conn = _history.open_history(_local.history_path_for(board.device))
-            try:
-                _history.record_message(conn, contact=name, direction="out",
-                                        epoch=0, sequence=0, text=text)
-            finally:
-                conn.close()
-        except (ValueError, TypeError, OSError, RuntimeError):
-            pass
+        self.thread_msg(board.serial, name, text, "amber",
+                        direction="out", state="queued")
+        # queued -> sent once the firmware accepts the frame (the ACKED
+        # tick lands later via the ACKNOWLEDGED reply).
+        self._set_state(board.serial, name, text, "queued", "sent")
+        self.select(board.serial, name)
+        self._remember(board, name, "out", text)
 
     def send_all(self, text: str) -> None:
-        """Fan one line out to every board's current target."""
+        """Fan one line out to every board's current thread."""
         if not text.strip():
             self.say("usage: /all TEXT", "fault")
             return
@@ -303,29 +490,22 @@ class Tui:
                 continue
             name = self.target(board)
             if not name:
-                self.say(f"[{board.label or serial[:8]}] no target: /to NAME first", "fault")
+                self.say(f"[{board.label or serial[:8]}] no thread: /to NAME first", "fault")
                 continue
             cid = _contacts.resolve_contact(serial, name)
             if cid is None:
                 self.say(f"[{board.label or serial[:8]}] unknown contact '{name}'", "fault")
                 continue
             bus_id = self._request(serial, "send",
-                                 {"contact_id": cid, "text": text}, timeout=60.0)
+                                   {"contact_id": cid, "text": text}, timeout=60.0)
             self._send_seq += 1
             self.pending_sends[self._send_seq] = (serial, name, text, 0, bus_id)
-            self.room_msg(serial, name, f"[{board.label or '?'} → {name}] {text}", "amber")
-            try:
-                conn = _history.open_history(_local.history_path_for(board.device))
-                try:
-                    _history.record_message(conn, contact=name, direction="out",
-                                            epoch=0, sequence=0, text=text)
-                finally:
-                    conn.close()
-            except (ValueError, TypeError, OSError, RuntimeError):
-                pass
+            self.thread_msg(serial, name, text, "amber",
+                            direction="out", state="sent")
+            self._remember(board, name, "out", text)
 
     def find_history(self, needle: str) -> None:
-        """Search local histories + live rooms for `needle` (case-insensitive)."""
+        """Search local histories + live threads for `needle` (case-insensitive)."""
         needle = needle.strip()
         if not needle:
             self.say("usage: /find TEXT", "fault")
@@ -335,12 +515,10 @@ class Tui:
         for serial in self.order:
             board = self.known.get(serial)
             tag = (board.label if board else serial[:8]) or serial[:8]
-            for (_s, peer), msgs in self.rooms.items():
-                if _s != serial:
-                    continue
-                for _style, text in msgs:
-                    if want in text.lower():
-                        hits.append(("moss", f"[{tag} · {peer}] {text}"))
+            for peer, thread in self.threads.get(serial, {}).items():
+                for msg in thread.msgs:
+                    if want in msg.text.lower():
+                        hits.append(("moss", f"[{tag} · {peer}] {msg.text}"))
             try:
                 if board is None:
                     continue
@@ -361,7 +539,6 @@ class Tui:
         for style, line in hits[-20:]:
             self.say(line, style)
 
-
     def command(self, line: str) -> bool:
         """Run one `/` command. Returns False to quit."""
         cmd, _, rest = line[1:].partition(" ")
@@ -374,8 +551,10 @@ class Tui:
             elif not _contacts.valid_name(rest.strip()):
                 self.say("name must be 1-32 non-blank chars", "fault")
             else:
-                self.targets[board.serial] = rest.strip()
-                self.say(f"target: {rest.strip()}", "amber")
+                name = rest.strip()
+                self.get_thread(board.serial, name)
+                self.select(board.serial, name)
+                self.say(f"thread: {name}", "amber")
         elif cmd in ("block", "unblock", "delete"):
             if board is None or not rest.strip():
                 self.say(f"usage: /{cmd} NAME", "fault")
@@ -394,14 +573,13 @@ class Tui:
         elif cmd in ("status", "contacts"):
             if board is not None:
                 self._request(board.serial, cmd, None, timeout=10.0)
+                self.say(f"{cmd}: reply updates the header/sidebar", "dim")
         elif cmd == "settings":
-            # Read-only display: optional single-key filter. No `settings_set`
-            # path here by contract (TUI never writes tunables); use the
-            # `meshctl settings KEY VALUE` CLI for writes.
+            # Read-only display only (TUI never sends settings_set).
             if board is not None:
                 arg = rest.strip()
-                params = {"key": arg} if arg else None
-                self._request(board.serial, "settings_get", params, timeout=10.0)
+                self._request(board.serial, "settings_get",
+                              {"key": arg} if arg else None, timeout=10.0)
         elif cmd == "debug":
             self.debug = not self.debug
             self.say(f"debug {'on' if self.debug else 'off'}", "amber")
@@ -410,7 +588,7 @@ class Tui:
                 op = {"offer": "pair_offer", "proof": "pair_proof",
                       "confirm": "pair_confirm"}[rest.strip()]
                 self._request(board.serial, op, None, timeout=15.0)
-                self.say(f"pair {rest.strip()}: reply lands in log/history", "amber")
+                self.say(f"pair {rest.strip()}: reply lands below; compare fingerprint aloud", "amber")
         elif cmd == "find":
             self.find_history(rest)
         elif cmd == "all":
@@ -419,77 +597,154 @@ class Tui:
             self.say(f"unknown command /{cmd}", "fault")
         return True
 
+    # ---- drawing -------------------------------------------------------------
+    def header_text(self) -> str:
+        board = self.board()
+        if board is None:
+            return "— no board —"
+        info = self.info.get(board.serial, {})
+        label = info.get("label", board.label) or "?"
+        epoch = info.get("epoch", board.epoch)
+        tvalid = info.get("time_valid", board.time_valid)
+        radio = info.get("radio_enabled", board.radio_enabled)
+        counters = info.get("counters", board.counters) or {}
+        tx = counters.get("tx_ok", counters.get("tx", "?"))
+        rx = counters.get("rx_ok", counters.get("rx", "?"))
+        contact = self.sel_thread or "no thread"
+        return (f"{label} → {contact} · epoch {epoch} "
+                f"{'⏱ok' if tvalid else '⏱--'} · radio {'ON' if radio else 'OFF'} "
+                f"· tx {tx}/rx {rx}")
+
     def draw(self) -> None:
-        """Paint roster, log, input. Plain curses, no flicker tricks."""
+        """Paint sidebar, thread pane, input. Plain curses, no flicker tricks."""
         stdscr = self.stdscr
         h, w = stdscr.getmaxyx()
         stdscr.erase()
-        # Roster column (left, 24 wide), per-board version below label.
-        for i, serial in enumerate(self.order[: h - 6]):
+        side_w = 26
+        # Sidebar: board sections + threads with unread badges.
+        row = 1
+        for i, serial in enumerate(self.order):
+            if row >= h - 3:
+                break
             board = self.known.get(serial)
-            label = (board.label if board else serial[:8]) or serial[:8]
-            mark = "●" if i == self.current % len(self.order) else "○"
-            line = f"{mark} {label}"[:23]
+            info = self.info.get(serial, {})
+            label = info.get("label", getattr(board, "label", "")) or serial[:8]
+            active = serial == self.serial()
             try:
-                stdscr.addstr(1 + i * 2, 1, line,
-                              curses.color_pair(3) if i == self.current % len(self.order)
-                              else curses.color_pair(6))
-                ver = f"  v{board.firmware_version}"[:23] if board is not None and board.firmware_version else ""
-                if ver:
-                    stdscr.addstr(2 + i * 2, 1, ver, curses.color_pair(6))
+                stdscr.addstr(row, 1, f"{'●' if active else '○'} {label}"[: side_w - 1],
+                              curses.color_pair(3) if active else curses.color_pair(2))
             except curses.error:
                 pass
-        # Traffic log (center).
-        board = self.board()
-        target = self.target(board) if board is not None else ""
-        header = f"{board.label if board else '—'} → {target or 'no target'} · {self.status}"
+            row += 1
+            for name in self.thread_names(serial):
+                if row >= h - 3:
+                    break
+                thread = self.threads[serial][name]
+                badge = f" ({thread.unread})" if thread.unread else ""
+                line = f"  {name}{badge}"[: side_w - 1]
+                selected = active and name == self.sel_thread
+                try:
+                    stdscr.addstr(row, 1, line,
+                                  curses.color_pair(3) | curses.A_REVERSE if selected
+                                  else curses.color_pair(4 if thread.unread else 6))
+                except curses.error:
+                    pass
+                row += 1
+            if not self.threads.get(serial):
+                try:
+                    stdscr.addstr(row, 1, "  (F2: add contact)"[: side_w - 1],
+                                  curses.color_pair(6))
+                except curses.error:
+                    pass
+                row += 1
+        # Thread pane header + divider.
         try:
-            stdscr.addstr(0, 26, header[: w - 27], curses.color_pair(2))
-            stdscr.vline(0, 24, curses.ACS_VLINE, h - 2)
-            stdscr.hline(h - 3, 25, curses.ACS_HLINE, w - 26)
+            stdscr.addstr(0, side_w + 2, self.header_text()[: w - side_w - 3],
+                          curses.color_pair(2))
+            stdscr.vline(0, side_w, curses.ACS_VLINE, h - 2)
+            stdscr.hline(h - 3, side_w + 1, curses.ACS_HLINE, w - side_w - 1)
         except curses.error:
             pass
-        key = self.room_key(board.serial, target) if board is not None and target else None
-        room = self.rooms.get(key, []) if key is not None else self.log
-        visible = room[-(h - 5):] if key is not None else self.log[-(h - 5):]
-        styles = {"amber": 3, "moss": 4, "fault": 5, "paper": 1, "dim": 6}
-        for i, (style, text) in enumerate(visible):
-            try:
-                stdscr.addstr(1 + i, 26, text[: w - 27], curses.color_pair(styles.get(style, 1)))
-            except curses.error:
-                pass
+        thread = self.current_thread()
+        if thread is None and not self.log:
+            lines = FIRST_RUN_HELP if self.flat_threads() == [] else [
+                "Pick a thread on the left (Up/Down), or F2 for contacts."]
+            for i, text in enumerate(lines[-(h - 5):]):
+                try:
+                    stdscr.addstr(1 + i, side_w + 2, text[: w - side_w - 3],
+                                  curses.color_pair(6 if text.startswith("  ") or not text else 1))
+                except curses.error:
+                    pass
+        else:
+            bubbles: list[tuple[str, str]] = []
+            if thread is not None:
+                for msg in thread.msgs[-(h - 5):]:
+                    tick = TICKS.get(msg.state, "?")
+                    if msg.direction == "in":
+                        bubbles.append(("moss", f"← {msg.text}"))
+                    else:
+                        bubbles.append(("amber", f"  {msg.text} {tick}"))
+            else:
+                bubbles = [(style, text) for style, text in self.log[-(h - 5):]]
+            if self.debug and self.log and thread is not None:
+                bubbles += [("dim", f"… {text}") for _s, text in self.log[-3:]]
+            styles = {"amber": 3, "moss": 4, "fault": 5, "paper": 1, "dim": 6}
+            for i, (style, text) in enumerate(bubbles[-(h - 5):]):
+                try:
+                    stdscr.addstr(1 + i, side_w + 2, text[: w - side_w - 3],
+                                  curses.color_pair(styles.get(style, 1)))
+                except curses.error:
+                    pass
         # Picker / palette popups above the input line.
-        row = h - 4
+        brow = h - 4
+        board = self.board()
         if self.picker >= 0 and board is not None:
             for i, name in enumerate(self.names(board)):
-                if row - i < 1:
+                if brow - i < 1:
                     break
                 try:
-                    stdscr.addstr(row - i, 26, f"{'▸' if i == self.picker % max(len(self.names(board)), 1) else ' '} {name}"[: w - 27],
+                    stdscr.addstr(brow - i, side_w + 2,
+                                  f"{'▸' if i == self.picker % max(len(self.names(board)), 1) else ' '} {name}"[: w - side_w - 3],
                                   curses.color_pair(3) if i == self.picker % max(len(self.names(board)), 1) else curses.color_pair(6))
                 except curses.error:
                     pass
         elif self.palette >= 0:
             items = [c for c in self.palette_items() if self.input[1:].lower() in c.lower()]
             for i, item in enumerate(items[:8]):
-                if row - i < 1:
+                if brow - i < 1:
                     break
                 try:
-                    stdscr.addstr(row - i, 26, f"{'▸' if i == self.palette % max(len(items), 1) else ' '} {item}"[: w - 27],
+                    stdscr.addstr(brow - i, side_w + 2,
+                                  f"{'▸' if i == self.palette % max(len(items), 1) else ' '} {item}"[: w - side_w - 3],
                                   curses.color_pair(3) if i == self.palette % max(len(items), 1) else curses.color_pair(6))
                 except curses.error:
                     pass
         # Input + help.
         try:
-            stdscr.addstr(h - 2, 26, ("> " + self.input)[-(w - 27):], curses.color_pair(1))
+            stdscr.addstr(h - 2, side_w + 2, ("> " + self.input)[-(w - side_w - 3):],
+                          curses.color_pair(1))
             stdscr.addstr(h - 1, 1, HELP_LINES[0][: w - 2], curses.color_pair(6))
         except curses.error:
             pass
         try:
-            stdscr.move(h - 2, min(28 + len(self.input), w - 1))
+            stdscr.move(h - 2, min(side_w + 4 + len(self.input), w - 1))
         except curses.error:
             pass
         stdscr.refresh()
+
+
+def _snapshot(board: _boards.Board) -> dict:
+    """Header facts from a probe (live status replies refresh these)."""
+    return {
+        "label": board.label,
+        "epoch": board.epoch,
+        "time_valid": board.time_valid,
+        "radio_enabled": board.radio_enabled,
+        "radio_available": board.radio_available,
+        "counters": dict(board.counters),
+        "contacts": board.contacts,
+    }
+
 
 def _scan() -> dict[str, _boards.Board]:
     """Probe attached boards into serial-keyed map."""
@@ -543,9 +798,8 @@ def _run(stdscr: object, known: dict) -> int:
                 tui.picker = (tui.picker + 1) % len(names)
             elif key in (curses.KEY_ENTER, 10, 13) and board is not None and names:
                 name = names[tui.picker % len(names)]
-                tui.targets[board.serial] = name
-                tui.contact_idx[board.serial] = tui.picker % len(names)
-                tui.say(f"target: {name}", "amber")
+                tui.select(board.serial, name)
+                tui.say(f"thread: {name}", "amber")
                 tui.picker = -1
             elif key in (curses.KEY_F2, 27):
                 tui.picker = -1
@@ -554,21 +808,22 @@ def _run(stdscr: object, known: dict) -> int:
             board = tui.board()
             if board is not None and tui.names(board):
                 tui.picker = 0
+            else:
+                tui.say("no contacts yet: /to NAME to start one", "fault")
         elif key in (ord("1"), ord("2"), ord("3")) and not tui.input:
             want = "ABC"[key - ord("1")]
             for i, s in enumerate(tui.order):
                 if (tui.known[s].label or "?") == want:
-                    tui.current = i
+                    tui.sel_board = i
+                    names = tui.thread_names(s)
+                    tui.select(s, names[0] if names else None)
                     break
+        elif key in (curses.KEY_UP, curses.KEY_DOWN) and not (
+                tui.input.startswith("/")):
+            # Arrows switch thread (Up/Down); palette owns them for `/`.
+            tui.step_thread(-1 if key == curses.KEY_UP else 1)
         elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and not tui.input:
-            board = tui.board()
-            if board is not None:
-                names = tui.names(board)
-                if names:
-                    step = 1 if key == curses.KEY_RIGHT else -1
-                    idx = (tui.contact_idx.get(board.serial, 0) + step) % len(names)
-                    tui.contact_idx[board.serial] = idx
-                    tui.targets[board.serial] = names[idx]
+            tui.step_thread(-1 if key == curses.KEY_LEFT else 1)
         elif key == 9:  # Tab: complete partial name, else cycle boards
             board = tui.board()
             frag = tui.input[3:] if tui.input.startswith("/to ") else tui.input
@@ -580,7 +835,7 @@ def _run(stdscr: object, known: dict) -> int:
                 tui.picker = 0
                 tui.say("Tab: " + ", ".join(matches), "dim")
             elif tui.order:
-                tui.current = (tui.current + 1) % len(tui.order)
+                tui.cycle_board()
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             tui.input = tui.input[:-1]
             tui.palette = 0 if tui.input.startswith("/") else -1
