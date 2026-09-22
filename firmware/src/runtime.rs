@@ -1116,7 +1116,9 @@ impl<'a, E: Entropy> Runtime<'a, E> {
                 self.forward = None;
             }
             if !ok {
-                self.emit_err(id, usb::err::STORAGE_FAULT);
+                // L5: commit already succeeded; a barrier timeout is a
+                // transient radio stall, not a storage failure.
+                self.emit_err(id, usb::err::BUSY);
                 return;
             }
         } else if !enabled {
@@ -1178,7 +1180,8 @@ impl<'a, E: Entropy> Runtime<'a, E> {
             }
             let ok = self.wait_control(barrier).await;
             if !ok {
-                self.emit_err(id, usb::err::STORAGE_FAULT);
+                // L5: commit already succeeded; barrier timeout is BUSY.
+                self.emit_err(id, usb::err::BUSY);
                 return;
             }
         }
