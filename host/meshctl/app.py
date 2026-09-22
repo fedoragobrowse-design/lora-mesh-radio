@@ -470,6 +470,9 @@ class MeshChat(tk.Tk):
         name = _sd.askstring("Contact name", "Local display name:")
         if not name:
             return
+        sas = _sd.askstring("SAS check",
+            "Compare the transcript aloud on BOTH sides, then type YES to activate confirmation records:")
+        sas_match = bool(sas) and sas.strip().upper() == "YES"
         from . import serial_link as _sl
 
         try:
@@ -479,8 +482,11 @@ class MeshChat(tk.Tk):
             return
         try:
             with _sl.SerialSession(board.device) as session:
+                params = {"record_b64": text}
+                if sas_match:
+                    params["sas_match"] = True
                 reply, _ = session.exchange(
-                    "pair_import", {"record_b64": text}, 10.0)
+                    "pair_import", params, 10.0)
         except (_sl.PortBusyError, _sl.TimeoutError, ValueError, RuntimeError, OSError) as exc:
             self._dbg(f"pair import: {exc} (detach the station first)")
             return

@@ -1271,17 +1271,24 @@ fn air_from_outgoing(frame: &OutgoingFrame) -> AirFrame {
 }
 
 fn engine_code(e: EngineError) -> &'static str {
+    // Mirrors usb::engine_err explicitly: future variants must fail
+    // compilation here instead of collapsing to BAD_REQUEST.
     match e {
         EngineError::BadRequest => usb::err::BAD_REQUEST,
         EngineError::Unprovisioned => usb::err::UNPROVISIONED,
         EngineError::StorageFault => usb::err::STORAGE_FAULT,
         EngineError::TimeUnset => usb::err::TIME_UNSET,
         EngineError::TimeRollback => usb::err::TIME_ROLLBACK,
+        EngineError::TimeJumpNeedsConfirm => usb::err::TIME_JUMP_NEEDS_CONFIRM,
         EngineError::Busy => usb::err::BUSY,
         EngineError::ContactBlocked => usb::err::CONTACT_BLOCKED,
         EngineError::RadioMustBeOff => usb::err::RADIO_MUST_BE_OFF,
         EngineError::RadioUnavailable => usb::err::RADIO_UNAVAILABLE,
-        _ => usb::err::BAD_REQUEST,
+        EngineError::UnknownOp => usb::err::UNKNOWN_OP,
+        EngineError::PairingAbsent => usb::err::BAD_REQUEST,
+        EngineError::PairingExpired => usb::err::BAD_REQUEST,
+        EngineError::NoSlot => usb::err::BAD_REQUEST,
+        EngineError::SasMismatch => usb::err::SAS_MISMATCH,
     }
 }
 

@@ -122,7 +122,19 @@ def cmd_uf2(args: argparse.Namespace) -> int:
 
 
 def cmd_reboot(args: argparse.Namespace) -> int:
-    """Live reboot into app or BOOTSEL (needs raw USB; PERMISSION-aware)."""
+    """Live reboot into app or BOOTSEL (USB session; picotool fallback)."""
+    if args.bootsel and getattr(args, "port", None):
+        from . import serial_link as _sl
+        try:
+            with _sl.SerialSession(args.port) as session:
+                reply, _ = session.exchange(
+                    "reboot_bootsel", {"confirm": True}, 10.0)
+        except (_sl.PortBusyError, _sl.TimeoutError, ValueError, RuntimeError, OSError) as exc:
+            return _err(f"reboot_bootsel failed: {exc}")
+        if not reply.get("ok"):
+            return _err(f"firmware error: {reply.get('error', 'UNKNOWN')}")
+        print("rebooting to BOOTSEL (drive appears shortly)")
+        return 0
     from . import device as _device
 
     try:
@@ -229,7 +241,7 @@ def cmd_history(args: argparse.Namespace) -> int:
 
     try:
         conn = _history.open_history(_local.history_path_for(args.port))
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         return _err(str(exc))
     try:
         rows = _history.recent_messages(conn, args.limit)
