@@ -9,7 +9,7 @@
       "label": "radio-secure (default — private mesh + SX1276 RF)",
       "version": "0.1.0",
       "file": "firmware/radio-secure.uf2",
-      "sha256": "1ba682e76054dd2a3024e55c2bec197450a95abc2fe1f18b570a6b909d98d851",
+      "sha256": "cf69d54cb5618a1af556ab4ccf0f3c91c4d888eb6845579a5cd140eb9a246187",
       "notes": "Default image. Initializes SPI + SX1276, reports radio_available true. Copy this unless you explicitly need the diagnostic build."
     },
     {
@@ -18,7 +18,7 @@
       "label": "radio-free (diagnostic only — no RF)",
       "version": "0.1.0",
       "file": "firmware/radio-free.uf2",
-      "sha256": "c2c87432791e033e5b58802a226142b026c23dadd9ceb443ff503751b1949869",
+      "sha256": "0598753180d15e8680bc5edc65f7f4a05f884a2095f065bf52a71dcdd039408d",
       "notes": "Bench diagnostic. Never touches SPI/radio; send/ping/radio-on return RADIO_UNAVAILABLE. Pairing, contacts and time still work."
     }
   ]
